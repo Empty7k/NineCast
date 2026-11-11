@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+.uv-python/
+
+# Local configuration and secrets
+.env
+.streamlit/secrets.toml
+
+# NineCast private and generated data
+data/uploads/
+data/voices/
+data/scripts/
+data/podcasts/
+data/models/
+
+# Model and application caches
+.cache/
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Local development-agent metadata
+.agents/
+.aws/
+.codex/
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
