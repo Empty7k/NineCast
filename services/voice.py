@@ -53,9 +53,9 @@ def _get_model():
     with _lock:
         if _model is None:
             # Definidos antes da importação do Coqui/Hugging Face, sem impor download.
-            os.environ.setdefault("HF_HOME", str(config.DATA_DIR / "models" / "huggingface"))
-            os.environ.setdefault("XDG_DATA_HOME", str(config.DATA_DIR / "models"))
-            torch.set_num_threads(6)
+            os.environ.setdefault("HF_HOME", str(config.MODELS_DIR / "huggingface"))
+            os.environ.setdefault("XDG_DATA_HOME", str(config.MODELS_DIR))
+            torch.set_num_threads(config.CPU_THREADS)
             try:
                 from TTS.api import TTS
 
@@ -202,12 +202,12 @@ def synthesize_speech(text: str, voice_name: str, output_path: Path) -> dict:
         try:
             gpt, speaker = get_or_create_voice_latents(voice_name)
             model = _get_model()
-            tokens = model.tokenizer.encode(text.strip().lower(), lang=config.TTS_LANGUAGE)
+            tokens = model.tokenizer.encode(text.strip().lower(), lang=config.DEFAULT_LANGUAGE)
             if len(tokens) >= model.args.gpt_max_text_tokens:
                 raise ValueError("Texto longo demais para um único trecho XTTS; divida-o em frases menores.")
             started = time.perf_counter()
             with torch.inference_mode():
-                result = model.inference(text=text.strip(), language=config.TTS_LANGUAGE,
+                result = model.inference(text=text.strip(), language=config.DEFAULT_LANGUAGE,
                                          gpt_cond_latent=gpt, speaker_embedding=speaker, **_GENERATION)
             elapsed = time.perf_counter() - started
             audio = np.asarray(result["wav"])

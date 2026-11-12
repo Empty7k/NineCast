@@ -12,7 +12,7 @@ sys.path.insert(0, str(ROOT))
 from streamlit.testing.v1 import AppTest
 
 import config
-from services import audio, voice
+from services import audio, library, voice
 
 
 class AppTests(unittest.TestCase):
@@ -20,9 +20,71 @@ class AppTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
+        patcher = mock.patch.object(config, "PODCASTS_DIR", self.root / "podcasts")
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def app(self):
         return AppTest.from_file(str(ROOT / "app.py"), default_timeout=20)
+
+    def test_library_empty_and_populated(self):
+        with mock.patch.object(library, "list_episodes", return_value=[]):
+            app = self.app().run()
+            self.assertFalse(app.exception)
+            self.assertTrue(any("Nenhum episódio gravado" in item.value for item in app.info))
+        path = self.root / "episodio.mp3"
+        path.write_bytes(b"ID3 teste")
+        episode = {"filename": path.name, "path": path, "size_mb": 1.0, "created_at": "12/11/2026 14:30"}
+        with mock.patch.object(library, "list_episodes", return_value=[episode]):
+            app = self.app().run()
+            self.assertFalse(app.exception)
+            self.assertEqual(len(app.get("audio")), 1)
+            self.assertEqual(len(app.get("download_button")), 1)
+            self.assertTrue(any("Total de episódios: 1" in item.value for item in app.caption))
+
+    def test_library_delete_requires_confirmation(self):
+        folder = config.PODCASTS_DIR
+        folder.mkdir()
+        path = folder / "episodio.mp3"
+        path.write_bytes(b"ID3 teste")
+        app = self.app().run()
+        button = next(b for b in app.button if b.label == "Excluir episódio")
+        self.assertTrue(button.disabled)
+        next(c for c in app.checkbox if c.label == "Confirmar exclusão permanente").check().run()
+        next(b for b in app.button if b.label == "Excluir episódio").click().run()
+        self.assertFalse(app.exception)
+        self.assertFalse(path.exists())
+        self.assertTrue(any("excluído" in item.value for item in app.success))
+
+    def test_library_loads_only_selected_episode(self):
+        folder = config.PODCASTS_DIR
+        folder.mkdir()
+        (folder / "a.mp3").write_bytes(b"ID3 primeiro")
+        (folder / "b.mp3").write_bytes(b"ID3 segundo")
+        app = self.app().run()
+        self.assertFalse(app.exception)
+        self.assertEqual(len(app.get("audio")), 1)
+        self.assertEqual(len(app.get("download_button")), 1)
+        selector = next(s for s in app.selectbox if s.label == "Escolha um episódio")
+        selector.select("a.mp3").run()
+        self.assertFalse(app.exception)
+        self.assertEqual(len(app.get("audio")), 1)
+
+    def test_import_pdf_updates_editable_script(self):
+        fake_pdf = mock.Mock()
+        fake_pdf.getvalue.return_value = b"pdf"
+        def upload(label, **kwargs):
+            return fake_pdf if label == "Documento PDF" else None
+        with mock.patch.object(voice, "list_available_voices", return_value=[]), \
+             mock.patch("streamlit.file_uploader", side_effect=upload), \
+             mock.patch("services.content.extract_pdf_text", return_value="Texto extraído"):
+            app = self.app().run()
+            app.text_area[0].input("Roteiro anterior").run()
+            next(b for b in app.button if b.label == "Extrair texto do PDF").click().run()
+            self.assertFalse(app.exception)
+            self.assertEqual(app.text_area[0].value, "Texto extraído")
+            app.text_area[0].input("Texto revisado").run()
+            self.assertEqual(app.text_area[0].value, "Texto revisado")
 
     def test_render_with_and_without_voices(self):
         with mock.patch.object(voice, "list_available_voices", return_value=[]):
@@ -41,8 +103,10 @@ class AppTests(unittest.TestCase):
             app = self.app().run()
             app.text_area[0].input(script).run()
             self.assertFalse(app.exception)
-            expected = f"{len(script.split())} palavras · {len(script)} caracteres · Estimativa de ~2 blocos"
-            self.assertTrue(any(expected in item.value for item in app.caption))
+            metrics = {item.label: item.value for item in app.metric}
+            self.assertEqual(metrics["Palavras"], str(len(script.split())))
+            self.assertEqual(metrics["Blocos XTTS"], "2")
+            self.assertEqual(metrics["Duração estimada"], f"~{len(script.split()) / 150:.1f} min")
 
     def test_generate_and_keep_result_after_interaction(self):
         podcast = self.root / "teste.mp3"
@@ -57,15 +121,17 @@ class AppTests(unittest.TestCase):
         with mock.patch.object(voice, "list_available_voices", return_value=["voz"]), \
              mock.patch.object(audio, "generate_podcast", side_effect=generate) as generate_mock:
             app = self.app().run()
-            app.checkbox[0].check()
+            next(c for c in app.checkbox if c.label.startswith("Li e aceito")).check()
             app.text_area[0].input("Este é um roteiro de teste para gerar o podcast.")
             next(button for button in app.button if button.label == "🎙️ Gerar Podcast").click().run()
             self.assertFalse(app.exception)
             self.assertEqual(generate_mock.call_count, 1)
             self.assertEqual(len(app.get("audio")), 1)
             self.assertEqual(len(app.get("download_button")), 1)
-            self.assertTrue(any("Duração: 7.5 s" in item.value and "RTF de síntese: 2.50×" in item.value
-                                for item in app.caption))
+            metrics = {item.label: item.value for item in app.metric}
+            self.assertEqual(metrics["Duração"], "7.5 s")
+            self.assertEqual(metrics["Geração"], "20.0 s")
+            self.assertEqual(metrics["RTF de síntese"], "2.50×")
             app.text_area[0].input("Texto alterado após gerar o episódio.").run()
             self.assertFalse(app.exception)
             self.assertEqual(len(app.get("audio")), 1)
@@ -79,11 +145,28 @@ class AppTests(unittest.TestCase):
         with mock.patch.object(voice, "list_available_voices", return_value=["voz"]), \
              mock.patch.object(audio, "generate_podcast", side_effect=MemoryError):
             app = self.app().run()
-            app.checkbox[0].check()
+            next(c for c in app.checkbox if c.label.startswith("Li e aceito")).check()
             app.text_area[0].input("Texto para gerar áudio.")
             next(button for button in app.button if button.label == "🎙️ Gerar Podcast").click().run()
             self.assertFalse(app.exception)
             self.assertTrue(any("Memória insuficiente" in item.value for item in app.error))
+
+    def test_license_required_for_generation_and_voice_registration(self):
+        upload = mock.Mock()
+        upload.getvalue.return_value = b"audio"
+        with mock.patch.object(voice, "list_available_voices", return_value=["voz"]), \
+             mock.patch.object(voice, "get_or_create_voice_latents") as create, \
+             mock.patch.object(audio, "generate_podcast") as generate, \
+             mock.patch("streamlit.file_uploader", return_value=upload):
+            app = self.app().run()
+            app.text_input[0].input("outra voz")
+            next(b for b in app.button if b.label == "Cadastrar voz").click().run()
+            self.assertTrue(any("aceite a licença" in e.value for e in app.error))
+            create.assert_not_called()
+            app.text_area[0].input("Texto de exemplo")
+            next(b for b in app.button if b.label == "🎙️ Gerar Podcast").click().run()
+            self.assertTrue(any("aceite a licença" in e.value for e in app.error))
+            generate.assert_not_called()
 
     def test_add_voice_upload_is_temporary(self):
         names = []
@@ -97,7 +180,7 @@ class AppTests(unittest.TestCase):
              mock.patch.object(voice, "get_or_create_voice_latents", side_effect=create), \
              mock.patch("streamlit.file_uploader", return_value=fake_upload):
             app = self.app().run()
-            app.checkbox[0].check()
+            next(c for c in app.checkbox if c.label.startswith("Li e aceito")).check()
             app.text_input[0].input("Nova voz")
             next(button for button in app.button if button.label == "Cadastrar voz").click().run()
             self.assertFalse(app.exception)

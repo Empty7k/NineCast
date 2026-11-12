@@ -110,23 +110,23 @@ def main() -> None:
 
     # Reutiliza o cache local da etapa de benchmark, sem conexão ao Hub.
     os.environ["HF_HUB_OFFLINE"] = "1"
-    os.environ["HF_HOME"] = str(config.DATA_DIR / "models" / "huggingface")
-    os.environ["XDG_DATA_HOME"] = str(config.DATA_DIR / "models")
+    os.environ["HF_HOME"] = str(config.MODELS_DIR / "huggingface")
+    os.environ["XDG_DATA_HOME"] = str(config.MODELS_DIR)
 
     config.PODCASTS_DIR.mkdir(parents=True, exist_ok=True)
     output_dir = Path(tempfile.mkdtemp(prefix="comparacao_xtts_", dir=config.PODCASTS_DIR))
-    torch.set_num_threads(6)
+    torch.set_num_threads(config.CPU_THREADS)
 
     from TTS.api import TTS
 
     print("Carregando XTTS-v2 em CPU...", flush=True)
     started = time.perf_counter()
-    tts = TTS(model_name=config.TTS_MODEL, progress_bar=False).to(config.TTS_DEVICE)
+    tts = TTS(model_name=config.TTS_MODEL, progress_bar=False).to("cpu")
     load_seconds = time.perf_counter() - started
     print(f"Modelo carregado em {load_seconds:.2f} s", flush=True)
     model = tts.synthesizer.tts_model
     report = {
-        "text": TEXT, "seed": SEED, "threads": 6, "device": config.TTS_DEVICE,
+        "text": TEXT, "seed": SEED, "threads": config.CPU_THREADS, "device": "cpu",
         "model": config.TTS_MODEL, "conditioning": CONDITIONING,
         "load_seconds": load_seconds, "parameters": SETTINGS,
         "preprocessing": {"split_db": 30, "pause_seconds": 0.15, "references": {}},
@@ -158,7 +158,7 @@ def main() -> None:
             reset_seed()
             started = time.perf_counter()
             result = model.inference(
-                text=TEXT, language=config.TTS_LANGUAGE,
+                text=TEXT, language=config.DEFAULT_LANGUAGE,
                 gpt_cond_latent=gpt_latents, speaker_embedding=speaker_embedding,
                 **SETTINGS,
             )

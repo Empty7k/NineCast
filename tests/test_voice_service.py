@@ -105,8 +105,12 @@ class RealXTTSIntegration(unittest.TestCase):
     def test_real_model_reuses_voice_cache(self):
         if os.environ.get("NINECAST_RUN_XTTS_INTEGRATION") != "1":
             self.skipTest("Use --integration para executar XTTS real.")
-        references = [config.VOICES_DIR / name for name in ("13seg.wav", "2.wav", "3.wav")]
-        if not all(p.is_file() for p in references):
+        preferred = [config.VOICES_DIR / name for name in ("13seg.wav", "2.wav", "3.wav")]
+        references = preferred if all(path.is_file() for path in preferred) else [
+            path for path in sorted(config.VOICES_DIR.glob("*.wav"), key=lambda path: path.name)
+            if path.is_file() and not path.name.startswith(".")
+        ][:3]
+        if not references:
             self.skipTest("As referências autorizadas de teste não estão disponíveis.")
         with tempfile.TemporaryDirectory(prefix="ninecast_integration_") as temporary:
             root = Path(temporary)

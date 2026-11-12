@@ -14,13 +14,10 @@ venv/
 # Local configuration and secrets
 .env
 .streamlit/secrets.toml
+NineCast.desktop
 
 # NineCast private and generated data
-data/uploads/
-data/voices/
-data/scripts/
-data/podcasts/
-data/models/
+data/
 
 # Model and application caches
 .cache/

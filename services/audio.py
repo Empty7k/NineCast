@@ -122,7 +122,7 @@ def generate_podcast(
     O callback recebe o número de blocos já concluídos e o total. A duração é
     medida no WAV de montagem, incluindo as pausas, antes da codificação MP3.
     """
-    chunks = _chunks_with_paragraphs(text, 220)
+    chunks = _chunks_with_paragraphs(text, config.XTTS_MAX_CHARS)
     if progress_callback is not None and not callable(progress_callback):
         raise TypeError("progress_callback deve ser uma função ou None.")
     ffmpeg = shutil.which("ffmpeg")

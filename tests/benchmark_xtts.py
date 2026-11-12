@@ -62,7 +62,7 @@ def main() -> int:
         "--threads",
         type=int,
         default=None,
-        help="Quantidade de threads PyTorch para inferência (padrão: 6 threads físicas).",
+        help=f"Quantidade de threads PyTorch para inferência (padrão: {config.CPU_THREADS}).",
     )
     parser.add_argument(
         "--agree-license",
@@ -95,7 +95,7 @@ def main() -> int:
     # Configuração de threads do PyTorch
     initial_threads = torch.get_num_threads()
     # Em CPUs como Ryzen 5 5650U (6c/12t), limitar a 6 threads físicas costuma reduzir contenção
-    threads_to_use = args.threads if args.threads is not None else 6
+    threads_to_use = args.threads if args.threads is not None else config.CPU_THREADS
     torch.set_num_threads(threads_to_use)
 
     output_path = config.PODCASTS_DIR / "benchmark_test.wav"
@@ -106,9 +106,9 @@ def main() -> int:
     print(f"Hardware detectado/configurado:")
     print(f"  - Threads lógicas disponíveis: {os.cpu_count()}")
     print(f"  - Threads PyTorch configuradas: {threads_to_use} (padrão inicial: {initial_threads})")
-    print(f"  - Dispositivo de inferência:   {config.TTS_DEVICE}")
+    print("  - Dispositivo de inferência:   cpu")
     print(f"  - Modelo alvo:                 {config.TTS_MODEL}")
-    print(f"  - Idioma:                      {config.TTS_LANGUAGE}")
+    print(f"  - Idioma:                      {config.DEFAULT_LANGUAGE}")
     print(f"  - Voz de referência:           {speaker_wav.name}")
     print(f"  - Texto de teste:              '{args.text}'")
     print("-" * 60)
@@ -134,7 +134,7 @@ def main() -> int:
     tts.tts_to_file(
         text=args.text,
         speaker_wav=str(speaker_wav),
-        language=config.TTS_LANGUAGE,
+        language=config.DEFAULT_LANGUAGE,
         file_path=str(output_path),
     )
     synth_time = time.perf_counter() - synth_start
