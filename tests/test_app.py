@@ -56,6 +56,20 @@ class AppTests(unittest.TestCase):
         self.assertFalse(path.exists())
         self.assertTrue(any("excluído" in item.value for item in app.success))
 
+    def test_library_loads_only_selected_episode(self):
+        folder = config.PODCASTS_DIR
+        folder.mkdir()
+        (folder / "a.mp3").write_bytes(b"ID3 primeiro")
+        (folder / "b.mp3").write_bytes(b"ID3 segundo")
+        app = self.app().run()
+        self.assertFalse(app.exception)
+        self.assertEqual(len(app.get("audio")), 1)
+        self.assertEqual(len(app.get("download_button")), 1)
+        selector = next(s for s in app.selectbox if s.label == "Escolha um episódio para ouvir ou baixar")
+        selector.select("a.mp3").run()
+        self.assertFalse(app.exception)
+        self.assertEqual(len(app.get("audio")), 1)
+
     def test_import_pdf_updates_editable_script(self):
         fake_pdf = mock.Mock()
         fake_pdf.getvalue.return_value = b"pdf"

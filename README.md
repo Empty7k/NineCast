@@ -20,6 +20,12 @@ disponível. O arquivo `.python-version` seleciona a versão para o projeto.
 
 ## Executar
 
+Inicie com `./ninecast.sh`. Para instalar um atalho no menu de aplicativos do
+usuário atual, execute `./ninecast.sh --install-desktop`. O atalho abre um
+terminal: use `Ctrl+C` nele para encerrar o servidor e liberar a memória.
+Se mover o projeto, remova o atalho antigo e execute a instalação novamente;
+o instalador não substitui um arquivo existente.
+
 ```bash
 uv run --locked streamlit run app.py
 ```

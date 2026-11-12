@@ -1,6 +1,6 @@
 [project]
 name = "ninecast"
-version = "0.1.0"
+version = "0.2.0"
 description = "Aplicativo local para transformar conteudos de estudo em podcasts narrados."
 requires-python = ">=3.12,<3.13"
 dependencies = [

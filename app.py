@@ -144,17 +144,19 @@ with tab_biblioteca:
         st.info("Nenhum episódio gravado ainda. Crie seu primeiro podcast na aba 'Novo Episódio'!")
     else:
         st.write(f"Total de episódios: {len(episodes)}")
+        selected_episode = st.selectbox("Escolha um episódio para ouvir ou baixar", [e["filename"] for e in episodes])
         for episode in episodes:
             name = episode["filename"]
             with st.expander(name):
                 st.caption(f"Modificado em {episode['created_at']} · {episode['size_mb']:.2f} MB")
-                try:
-                    data = episode["path"].read_bytes()
-                    st.audio(data, format="audio/mp3")
-                    st.download_button("⬇️ Baixar MP3", data=data, file_name=name,
-                                       mime="audio/mp3", key=f"download_{name}")
-                except OSError as exc:
-                    st.error(f"Não foi possível abrir o episódio: {exc}")
+                if name == selected_episode:
+                    try:
+                        st.audio(str(episode["path"]), format="audio/mp3")
+                        with episode["path"].open("rb") as audio_file:
+                            st.download_button("⬇️ Baixar MP3", data=audio_file, file_name=name,
+                                               mime="audio/mp3", key=f"download_{name}")
+                    except OSError as exc:
+                        st.error(f"Não foi possível abrir o episódio: {exc}")
                 confirm = st.checkbox("Confirmar exclusão permanente", key=f"confirm_{name}")
                 if st.button("Excluir episódio", key=f"delete_{name}", disabled=not confirm):
                     try:

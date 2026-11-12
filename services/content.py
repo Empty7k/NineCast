@@ -1,5 +1,6 @@
 """Extração local de texto de documentos PDF."""
 
+import re
 import pymupdf
 
 
@@ -17,4 +18,5 @@ def extract_pdf_text(data: bytes) -> str:
     text = "\n\n".join(page for page in pages if page)
     if not text:
         raise ValueError("Nenhum texto encontrado. PDFs digitalizados precisam de OCR, ainda não disponível.")
-    return text
+    # Apenas uma quebra de linha: não une palavras através de parágrafos.
+    return re.sub(r"(\b\w+)-[^\S\n\r]*\r?\n[^\S\n\r]*(\w+\b)", r"\1\2", text)
