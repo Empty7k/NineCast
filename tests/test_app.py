@@ -40,7 +40,7 @@ class AppTests(unittest.TestCase):
             self.assertFalse(app.exception)
             self.assertEqual(len(app.get("audio")), 1)
             self.assertEqual(len(app.get("download_button")), 1)
-            self.assertTrue(any("Total de episódios: 1" in item.value for item in app.markdown))
+            self.assertTrue(any("Total de episódios: 1" in item.value for item in app.caption))
 
     def test_library_delete_requires_confirmation(self):
         folder = config.PODCASTS_DIR
@@ -65,7 +65,7 @@ class AppTests(unittest.TestCase):
         self.assertFalse(app.exception)
         self.assertEqual(len(app.get("audio")), 1)
         self.assertEqual(len(app.get("download_button")), 1)
-        selector = next(s for s in app.selectbox if s.label == "Escolha um episódio para ouvir ou baixar")
+        selector = next(s for s in app.selectbox if s.label == "Escolha um episódio")
         selector.select("a.mp3").run()
         self.assertFalse(app.exception)
         self.assertEqual(len(app.get("audio")), 1)
@@ -103,8 +103,10 @@ class AppTests(unittest.TestCase):
             app = self.app().run()
             app.text_area[0].input(script).run()
             self.assertFalse(app.exception)
-            expected = f"{len(script.split())} palavras · {len(script)} caracteres · Estimativa de ~2 blocos"
-            self.assertTrue(any(expected in item.value for item in app.caption))
+            metrics = {item.label: item.value for item in app.metric}
+            self.assertEqual(metrics["Palavras"], str(len(script.split())))
+            self.assertEqual(metrics["Blocos XTTS"], "2")
+            self.assertEqual(metrics["Duração estimada"], f"~{len(script.split()) / 150:.1f} min")
 
     def test_generate_and_keep_result_after_interaction(self):
         podcast = self.root / "teste.mp3"
@@ -126,8 +128,10 @@ class AppTests(unittest.TestCase):
             self.assertEqual(generate_mock.call_count, 1)
             self.assertEqual(len(app.get("audio")), 1)
             self.assertEqual(len(app.get("download_button")), 1)
-            self.assertTrue(any("Duração: 7.5 s" in item.value and "RTF de síntese: 2.50×" in item.value
-                                for item in app.caption))
+            metrics = {item.label: item.value for item in app.metric}
+            self.assertEqual(metrics["Duração"], "7.5 s")
+            self.assertEqual(metrics["Geração"], "20.0 s")
+            self.assertEqual(metrics["RTF de síntese"], "2.50×")
             app.text_area[0].input("Texto alterado após gerar o episódio.").run()
             self.assertFalse(app.exception)
             self.assertEqual(len(app.get("audio")), 1)
@@ -146,6 +150,23 @@ class AppTests(unittest.TestCase):
             next(button for button in app.button if button.label == "🎙️ Gerar Podcast").click().run()
             self.assertFalse(app.exception)
             self.assertTrue(any("Memória insuficiente" in item.value for item in app.error))
+
+    def test_license_required_for_generation_and_voice_registration(self):
+        upload = mock.Mock()
+        upload.getvalue.return_value = b"audio"
+        with mock.patch.object(voice, "list_available_voices", return_value=["voz"]), \
+             mock.patch.object(voice, "get_or_create_voice_latents") as create, \
+             mock.patch.object(audio, "generate_podcast") as generate, \
+             mock.patch("streamlit.file_uploader", return_value=upload):
+            app = self.app().run()
+            app.text_input[0].input("outra voz")
+            next(b for b in app.button if b.label == "Cadastrar voz").click().run()
+            self.assertTrue(any("aceite a licença" in e.value for e in app.error))
+            create.assert_not_called()
+            app.text_area[0].input("Texto de exemplo")
+            next(b for b in app.button if b.label == "🎙️ Gerar Podcast").click().run()
+            self.assertTrue(any("aceite a licença" in e.value for e in app.error))
+            generate.assert_not_called()
 
     def test_add_voice_upload_is_temporary(self):
         names = []
