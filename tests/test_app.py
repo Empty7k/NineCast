@@ -12,7 +12,7 @@ sys.path.insert(0, str(ROOT))
 from streamlit.testing.v1 import AppTest
 
 import config
-from services import audio, voice
+from services import audio, library, voice
 
 
 class AppTests(unittest.TestCase):
@@ -20,9 +20,41 @@ class AppTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
+        patcher = mock.patch.object(config, "PODCASTS_DIR", self.root / "podcasts")
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def app(self):
         return AppTest.from_file(str(ROOT / "app.py"), default_timeout=20)
+
+    def test_library_empty_and_populated(self):
+        with mock.patch.object(library, "list_episodes", return_value=[]):
+            app = self.app().run()
+            self.assertFalse(app.exception)
+            self.assertTrue(any("Nenhum episódio gravado" in item.value for item in app.info))
+        path = self.root / "episodio.mp3"
+        path.write_bytes(b"ID3 teste")
+        episode = {"filename": path.name, "path": path, "size_mb": 1.0, "created_at": "12/11/2026 14:30"}
+        with mock.patch.object(library, "list_episodes", return_value=[episode]):
+            app = self.app().run()
+            self.assertFalse(app.exception)
+            self.assertEqual(len(app.get("audio")), 1)
+            self.assertEqual(len(app.get("download_button")), 1)
+            self.assertTrue(any("Total de episódios: 1" in item.value for item in app.markdown))
+
+    def test_library_delete_requires_confirmation(self):
+        folder = config.PODCASTS_DIR
+        folder.mkdir()
+        path = folder / "episodio.mp3"
+        path.write_bytes(b"ID3 teste")
+        app = self.app().run()
+        button = next(b for b in app.button if b.label == "Excluir episódio")
+        self.assertTrue(button.disabled)
+        next(c for c in app.checkbox if c.label == "Confirmar exclusão permanente").check().run()
+        next(b for b in app.button if b.label == "Excluir episódio").click().run()
+        self.assertFalse(app.exception)
+        self.assertFalse(path.exists())
+        self.assertTrue(any("excluído" in item.value for item in app.success))
 
     def test_import_pdf_updates_editable_script(self):
         fake_pdf = mock.Mock()
@@ -73,7 +105,7 @@ class AppTests(unittest.TestCase):
         with mock.patch.object(voice, "list_available_voices", return_value=["voz"]), \
              mock.patch.object(audio, "generate_podcast", side_effect=generate) as generate_mock:
             app = self.app().run()
-            app.checkbox[0].check()
+            next(c for c in app.checkbox if c.label.startswith("Li e aceito")).check()
             app.text_area[0].input("Este é um roteiro de teste para gerar o podcast.")
             next(button for button in app.button if button.label == "🎙️ Gerar Podcast").click().run()
             self.assertFalse(app.exception)
@@ -95,7 +127,7 @@ class AppTests(unittest.TestCase):
         with mock.patch.object(voice, "list_available_voices", return_value=["voz"]), \
              mock.patch.object(audio, "generate_podcast", side_effect=MemoryError):
             app = self.app().run()
-            app.checkbox[0].check()
+            next(c for c in app.checkbox if c.label.startswith("Li e aceito")).check()
             app.text_area[0].input("Texto para gerar áudio.")
             next(button for button in app.button if button.label == "🎙️ Gerar Podcast").click().run()
             self.assertFalse(app.exception)
@@ -113,7 +145,7 @@ class AppTests(unittest.TestCase):
              mock.patch.object(voice, "get_or_create_voice_latents", side_effect=create), \
              mock.patch("streamlit.file_uploader", return_value=fake_upload):
             app = self.app().run()
-            app.checkbox[0].check()
+            next(c for c in app.checkbox if c.label.startswith("Li e aceito")).check()
             app.text_input[0].input("Nova voz")
             next(button for button in app.button if button.label == "Cadastrar voz").click().run()
             self.assertFalse(app.exception)

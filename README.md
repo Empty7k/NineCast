@@ -36,6 +36,10 @@ O texto e o último resultado exibido permanecem na sessão da página; copie o
 roteiro antes de atualizá-la ou fechá-la. O MP3 salvo continua no disco após
 encerrar a sessão. Para encerrar o servidor, pressione `Ctrl+C` no terminal.
 
+Na aba **Minha Biblioteca**, consulte os MP3s em `data/podcasts/`, reproduza-os
+ou faça download. A data exibida é a última modificação do arquivo. A exclusão
+exige confirmação e remove o arquivo permanentemente do disco.
+
 Em **Importar texto de PDF**, selecione um documento e clique em **Extrair texto
 do PDF**. O conteúdo substitui o roteiro atual e pode ser revisado antes da
 geração. A extração ocorre localmente, sem salvar o PDF. Documentos digitalizados
