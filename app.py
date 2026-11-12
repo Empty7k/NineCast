@@ -7,7 +7,7 @@ from pathlib import Path
 import streamlit as st
 
 import config
-from services import audio, voice
+from services import audio, content, voice
 
 
 st.set_page_config(page_title="NineCast", page_icon="🎙️")
@@ -64,7 +64,19 @@ with st.sidebar:
 
 st.subheader("Seu roteiro")
 st.caption("Escreva ou cole o texto que deseja narrar e revise-o antes da geração.")
-script = st.text_area("Texto do episódio", height=300, placeholder="Comece escrevendo seu roteiro aqui...")
+with st.expander("📄 Importar texto de PDF"):
+    pdf = st.file_uploader("Documento PDF", type=["pdf"])
+    st.caption("A extração é local. O texto importado substituirá o roteiro atual; revise-o antes de gerar áudio.")
+    if st.button("Extrair texto do PDF"):
+        if pdf is None:
+            st.error("Selecione um documento PDF.")
+        else:
+            try:
+                st.session_state["script_text"] = content.extract_pdf_text(pdf.getvalue())
+                st.success("Texto extraído. Revise o roteiro abaixo.")
+            except (ValueError, RuntimeError) as exc:
+                st.error(f"Não foi possível extrair o PDF: {exc}")
+script = st.text_area("Texto do episódio", height=300, placeholder="Comece escrevendo seu roteiro aqui...", key="script_text")
 if script.strip():
     words = len(script.split())
     chunks = audio.split_text_into_chunks(script)

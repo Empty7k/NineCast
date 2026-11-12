@@ -36,6 +36,12 @@ O texto e o último resultado exibido permanecem na sessão da página; copie o
 roteiro antes de atualizá-la ou fechá-la. O MP3 salvo continua no disco após
 encerrar a sessão. Para encerrar o servidor, pressione `Ctrl+C` no terminal.
 
+Em **Importar texto de PDF**, selecione um documento e clique em **Extrair texto
+do PDF**. O conteúdo substitui o roteiro atual e pode ser revisado antes da
+geração. A extração ocorre localmente, sem salvar o PDF. Documentos digitalizados
+sem camada de texto exigem OCR, que ainda não está disponível; a ordem de leitura
+de documentos com várias colunas pode exigir revisão manual.
+
 ## Privacidade e dados
 
 Não inclua gravações, documentos, roteiros pessoais, podcasts ou credenciais no

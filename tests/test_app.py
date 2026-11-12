@@ -24,6 +24,22 @@ class AppTests(unittest.TestCase):
     def app(self):
         return AppTest.from_file(str(ROOT / "app.py"), default_timeout=20)
 
+    def test_import_pdf_updates_editable_script(self):
+        fake_pdf = mock.Mock()
+        fake_pdf.getvalue.return_value = b"pdf"
+        def upload(label, **kwargs):
+            return fake_pdf if label == "Documento PDF" else None
+        with mock.patch.object(voice, "list_available_voices", return_value=[]), \
+             mock.patch("streamlit.file_uploader", side_effect=upload), \
+             mock.patch("services.content.extract_pdf_text", return_value="Texto extraído"):
+            app = self.app().run()
+            app.text_area[0].input("Roteiro anterior").run()
+            next(b for b in app.button if b.label == "Extrair texto do PDF").click().run()
+            self.assertFalse(app.exception)
+            self.assertEqual(app.text_area[0].value, "Texto extraído")
+            app.text_area[0].input("Texto revisado").run()
+            self.assertEqual(app.text_area[0].value, "Texto revisado")
+
     def test_render_with_and_without_voices(self):
         with mock.patch.object(voice, "list_available_voices", return_value=[]):
             app = self.app().run()
