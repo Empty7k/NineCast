@@ -7,6 +7,22 @@ from services.content import extract_pdf_text
 
 
 class ContentTests(unittest.TestCase):
+    def test_repeated_edges_numbers_and_urls(self):
+        from unittest.mock import patch
+        class Page:
+            def __init__(self, text): self.text = text
+            def get_text(self, **kwargs): return self.text
+        class Document:
+            needs_pass = False
+            def __enter__(self): return self
+            def __exit__(self, *args): pass
+            def __iter__(self):
+                return iter([Page(f"Manual\nConteúdo {i}\nhttps://example.com\nPág. {i} de 3\nRodapé")
+                             for i in range(1, 4)])
+        with patch("services.content.pymupdf.open", return_value=Document()):
+            text = extract_pdf_text(b"pdf")
+        self.assertEqual(text, "Conteúdo 1\n\nConteúdo 2\n\nConteúdo 3")
+
     def test_hyphens_and_paragraphs(self):
         from unittest.mock import patch
         class Page:

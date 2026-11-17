@@ -14,7 +14,9 @@ from typing import Callable
 
 import config
 import numpy as np
-from services import voice
+from services import tts_text, voice
+
+normalize_text_for_tts = tts_text.normalize_text_for_tts
 
 _FILTERS = (
     "highpass=f=80,"
@@ -90,7 +92,7 @@ def _chunks_with_paragraphs(text: str, max_chars: int) -> list[tuple[str, int]]:
 
 
 def split_text_into_chunks(text: str, max_chars: int = 220) -> list[str]:
-    """Divide o texto por parágrafo, frase e palavra, preservando sua ordem."""
+    """Fatia texto bruto; normalize antes para estimar os blocos reais de TTS."""
     return [chunk for chunk, _ in _chunks_with_paragraphs(text, max_chars)]
 
 
@@ -219,7 +221,8 @@ def generate_podcast(
     if episode_title is not None and not isinstance(episode_title, str):
         raise TypeError("episode_title deve ser texto ou None.")
     clean_title = episode_title.strip() if episode_title else ""
-    chunks = _chunks_with_paragraphs(text, config.XTTS_MAX_CHARS)
+    normalized_text = tts_text.normalize_text_for_tts(text)
+    chunks = _chunks_with_paragraphs(normalized_text, config.XTTS_MAX_CHARS)
     if progress_callback is not None and not callable(progress_callback):
         raise TypeError("progress_callback deve ser uma função ou None.")
     ffmpeg = shutil.which("ffmpeg")
