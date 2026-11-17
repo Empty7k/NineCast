@@ -65,7 +65,19 @@ class VoiceServiceTests(unittest.TestCase):
 
     def test_changed_reference_invalidates_cache(self):
         voice.get_or_create_voice_latents("teste", [self.reference])
-        sf.write(self.reference, np.ones(24000, dtype=np.float32) * 0.1, 24000)
+        t = np.arange(24000) / 24000
+        sf.write(self.reference, 0.1 * np.sin(2 * np.pi * 220 * t), 24000)
+        voice.get_or_create_voice_latents("teste", [self.reference])
+        self.assertEqual(self.fake.extractions, 2)
+
+    def test_legacy_cache_is_usable_and_rebuilt_when_references_are_supplied(self):
+        voice.get_or_create_voice_latents("teste", [self.reference])
+        cache = config.VOICES_DIR / "teste.latents.pt"
+        data = torch.load(cache, weights_only=True)
+        del data["preparation_version"]
+        torch.save(data, cache)
+        voice.get_or_create_voice_latents("teste")
+        self.assertEqual(self.fake.extractions, 1)
         voice.get_or_create_voice_latents("teste", [self.reference])
         self.assertEqual(self.fake.extractions, 2)
 
@@ -91,7 +103,8 @@ class VoiceServiceTests(unittest.TestCase):
     def test_short_silences_are_preserved_and_long_ones_shortened(self):
         # Intervalos determinísticos evitam depender da resolução de quadros do librosa.
         rate = 24000
-        sf.write(self.reference, np.full(rate * 3, 0.1, dtype=np.float32), rate)
+        t = np.arange(rate * 3) / rate
+        sf.write(self.reference, 0.1 * np.sin(2 * np.pi * 180 * t), rate)
         intervals = np.array([[0, 12000], [18000, 30000], [42000, 54000]])
         output = self.root / "prepared.wav"
         with mock.patch("librosa.effects.split", return_value=intervals):
@@ -99,6 +112,32 @@ class VoiceServiceTests(unittest.TestCase):
         prepared, _ = sf.read(output)
         # A pausa de 0,25 s é preservada; a de 0,5 s vira 0,15 s mais padding.
         self.assertAlmostEqual(len(prepared) / rate, 1.99, places=2)
+
+    def test_reference_dc_removal_and_safe_peak_normalization(self):
+        rate = 24000
+        t = np.arange(rate) / rate
+        for amplitude, offset in ((0.02, 0.15), (0.7, -0.2)):
+            with self.subTest(amplitude=amplitude):
+                output = self.root / "prepared.wav"
+                sf.write(self.reference, offset + amplitude * np.sin(2 * np.pi * 180 * t),
+                         rate, subtype="FLOAT")
+                original = self.reference.read_bytes()
+                voice._prepare_reference(self.reference, output)
+                prepared, prepared_rate = sf.read(output)
+                self.assertEqual(prepared_rate, rate)
+                self.assertTrue(np.isfinite(prepared).all())
+                self.assertLess(abs(np.mean(prepared)), 1e-6)
+                self.assertAlmostEqual(np.max(np.abs(prepared)), 10 ** (-1 / 20), places=6)
+                self.assertEqual(self.reference.read_bytes(), original)
+
+    def test_reference_rejects_dc_only_and_silence(self):
+        for level in (0.0, 0.25):
+            with self.subTest(level=level):
+                sf.write(self.reference, np.full(24000, level), 24000, subtype="FLOAT")
+                output = self.root / "prepared.wav"
+                with self.assertRaises(ValueError):
+                    voice._prepare_reference(self.reference, output)
+                self.assertFalse(output.exists())
 
 
 class RealXTTSIntegration(unittest.TestCase):

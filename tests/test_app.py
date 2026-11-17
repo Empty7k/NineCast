@@ -34,13 +34,15 @@ class AppTests(unittest.TestCase):
             self.assertTrue(any("Nenhum episódio gravado" in item.value for item in app.info))
         path = self.root / "episodio.mp3"
         path.write_bytes(b"ID3 teste")
-        episode = {"filename": path.name, "path": path, "size_mb": 1.0, "created_at": "12/11/2026 14:30"}
+        episode = {"filename": path.name, "path": path, "size_mb": 1.0,
+                   "created_at": "12/11/2026 14:30", "duration": "01:23"}
         with mock.patch.object(library, "list_episodes", return_value=[episode]):
             app = self.app().run()
             self.assertFalse(app.exception)
             self.assertEqual(len(app.get("audio")), 1)
             self.assertEqual(len(app.get("download_button")), 1)
             self.assertTrue(any("Total de episódios: 1" in item.value for item in app.caption))
+            self.assertTrue(any("01:23" in item.value for item in app.caption))
 
     def test_library_delete_requires_confirmation(self):
         folder = config.PODCASTS_DIR
@@ -113,8 +115,9 @@ class AppTests(unittest.TestCase):
         podcast.write_bytes(b"ID3 amostra de MP3 para testar a interface")
         result = {"output_path": str(podcast), "audio_duration": 7.5, "total_seconds": 20.0, "rtf": 2.5}
 
-        def generate(text, voice_name, progress_callback):
+        def generate(text, voice_name, progress_callback, episode_title=None):
             self.assertEqual(voice_name, "voz")
+            self.assertEqual(episode_title, "Aula de testes")
             progress_callback(1, 1)
             return result
 
@@ -122,6 +125,7 @@ class AppTests(unittest.TestCase):
              mock.patch.object(audio, "generate_podcast", side_effect=generate) as generate_mock:
             app = self.app().run()
             next(c for c in app.checkbox if c.label.startswith("Li e aceito")).check()
+            next(item for item in app.text_input if item.label.startswith("Título do episódio")).input("Aula de testes")
             app.text_area[0].input("Este é um roteiro de teste para gerar o podcast.")
             next(button for button in app.button if button.label == "🎙️ Gerar Podcast").click().run()
             self.assertFalse(app.exception)
@@ -136,6 +140,18 @@ class AppTests(unittest.TestCase):
             self.assertFalse(app.exception)
             self.assertEqual(len(app.get("audio")), 1)
             self.assertEqual(generate_mock.call_count, 1)
+
+    def test_text_limit_warns_and_blocks_generation(self):
+        with mock.patch.object(config, "MAX_TEXT_CHARS", 10), \
+             mock.patch.object(voice, "list_available_voices", return_value=["voz"]), \
+             mock.patch.object(audio, "generate_podcast") as generate:
+            app = self.app().run()
+            next(c for c in app.checkbox if c.label.startswith("Li e aceito")).check()
+            app.text_area[0].input("roteiro longo demais").run()
+            self.assertTrue(any("excede o limite" in item.value for item in app.warning))
+            next(button for button in app.button if button.label == "🎙️ Gerar Podcast").click().run()
+            self.assertTrue(any("excede o limite" in item.value for item in app.error))
+            generate.assert_not_called()
 
     def test_validation_and_friendly_memory_error(self):
         with mock.patch.object(voice, "list_available_voices", return_value=[]):
@@ -157,9 +173,9 @@ class AppTests(unittest.TestCase):
         with mock.patch.object(voice, "list_available_voices", return_value=["voz"]), \
              mock.patch.object(voice, "get_or_create_voice_latents") as create, \
              mock.patch.object(audio, "generate_podcast") as generate, \
-             mock.patch("streamlit.file_uploader", return_value=upload):
+             mock.patch("streamlit.file_uploader", return_value=[upload]):
             app = self.app().run()
-            app.text_input[0].input("outra voz")
+            next(item for item in app.text_input if item.label == "Nome da voz").input("outra voz")
             next(b for b in app.button if b.label == "Cadastrar voz").click().run()
             self.assertTrue(any("aceite a licença" in e.value for e in app.error))
             create.assert_not_called()
@@ -169,24 +185,52 @@ class AppTests(unittest.TestCase):
             generate.assert_not_called()
 
     def test_add_voice_upload_is_temporary(self):
-        names = []
-        fake_upload = mock.Mock()
-        fake_upload.getvalue.return_value = b"WAV simulado"
-        def create(name, paths):
-            self.assertEqual(paths[0].read_bytes(), b"WAV simulado")
-            names.append(name)
-        with mock.patch.object(config, "VOICES_DIR", self.root / "voices"), \
-             mock.patch.object(voice, "list_available_voices", side_effect=lambda: list(names)), \
-             mock.patch.object(voice, "get_or_create_voice_latents", side_effect=create), \
-             mock.patch("streamlit.file_uploader", return_value=fake_upload):
+        for count in (1, 2, 5):
+            with self.subTest(samples=count):
+                names, reference_paths = [], []
+                contents = [f"WAV {index}".encode() for index in range(count)]
+                fake_uploads = [mock.Mock(name="mesmo_nome.wav") for _ in contents]
+                for upload, data in zip(fake_uploads, contents):
+                    upload.getvalue.return_value = data
+
+                def upload_files(label, **kwargs):
+                    if label == "Documento PDF":
+                        return None
+                    self.assertTrue(kwargs["accept_multiple_files"])
+                    self.assertEqual(kwargs["type"], ["wav"])
+                    return fake_uploads
+
+                def create(name, paths):
+                    # Todas as amostras existem antes da extração, na ordem do upload.
+                    self.assertEqual([path.read_bytes() for path in paths], contents)
+                    self.assertEqual(len(set(paths)), count)
+                    reference_paths.extend(paths)
+                    names.append(name)
+
+                with mock.patch.object(config, "VOICES_DIR", self.root / "voices"), \
+                     mock.patch.object(voice, "list_available_voices", side_effect=lambda: list(names)), \
+                     mock.patch.object(voice, "get_or_create_voice_latents", side_effect=create), \
+                     mock.patch("streamlit.file_uploader", side_effect=upload_files):
+                    app = self.app().run()
+                    next(c for c in app.checkbox if c.label.startswith("Li e aceito")).check()
+                    next(item for item in app.text_input if item.label == "Nome da voz").input("Nova voz")
+                    next(button for button in app.button if button.label == "Cadastrar voz").click().run()
+                    self.assertFalse(app.exception)
+                    self.assertEqual(app.selectbox[0].value, "Nova voz")
+                    self.assertTrue(any("cadastrada com sucesso" in item.value for item in app.success))
+                    self.assertEqual(list((self.root / "voices").iterdir()), [])
+                    self.assertTrue(all(not path.exists() for path in reference_paths))
+
+    def test_voice_registration_rejects_more_than_five_samples(self):
+        uploads = [mock.Mock() for _ in range(6)]
+        with mock.patch.object(voice, "list_available_voices", return_value=[]), \
+             mock.patch.object(voice, "get_or_create_voice_latents") as create, \
+             mock.patch("streamlit.file_uploader", return_value=uploads):
             app = self.app().run()
-            next(c for c in app.checkbox if c.label.startswith("Li e aceito")).check()
-            app.text_input[0].input("Nova voz")
+            next(item for item in app.text_input if item.label == "Nome da voz").input("Nova voz")
             next(button for button in app.button if button.label == "Cadastrar voz").click().run()
-            self.assertFalse(app.exception)
-            self.assertEqual(app.selectbox[0].value, "Nova voz")
-            self.assertTrue(any("cadastrada com sucesso" in item.value for item in app.success))
-            self.assertEqual(list((self.root / "voices").iterdir()), [])
+            self.assertTrue(any("no máximo 5" in item.value for item in app.error))
+            create.assert_not_called()
 
 
 if __name__ == "__main__":

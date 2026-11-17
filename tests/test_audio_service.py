@@ -22,7 +22,8 @@ from services import audio, voice
 
 def fake_synthesis(text, voice_name, output_path):
     rate = 24000
-    samples = np.full(rate // 10, 0.15, dtype=np.float32)
+    t = np.arange(rate // 10) / rate
+    samples = 0.15 * np.cos(2 * np.pi * 200 * t)
     sf.write(output_path, samples, rate, subtype="PCM_16")
     return {"synthesis_seconds": 0.05, "audio_duration": 0.1,
             "rtf": 0.5, "output_path": str(output_path)}
@@ -79,6 +80,109 @@ class AudioPipelineTests(unittest.TestCase):
         self.assertEqual(rate, 24000)
         self.assertTrue(np.all(samples[round(.1 * rate):round(.4 * rate)] == 0))
         self.assertTrue(np.all(samples[round(.5 * rate):round(1.1 * rate)] == 0))
+        for start, end in ((0, .1), (.4, .5), (1.1, 1.2)):
+            self.assertEqual(samples[round(start * rate)], 0)
+            self.assertEqual(samples[round(end * rate) - 1], 0)
+            self.assertGreater(abs(samples[round((start + .05) * rate)]), 0)
+
+    def test_generate_rejects_text_above_configured_limit(self):
+        with mock.patch.object(config, "MAX_TEXT_CHARS", 10), \
+             mock.patch.object(audio.voice, "synthesize_speech") as synthesize:
+            with self.assertRaisesRegex(ValueError, "limite de 10"):
+                audio.generate_podcast("texto longo demais", "voz", self.root / "saida.mp3")
+        synthesize.assert_not_called()
+
+    def test_trim_keeps_speech_margins_internal_pauses_and_configured_gaps(self):
+        rate = 24000
+        # Duas falas de 0,1 s com uma pausa interna de 0,2 s, que deve permanecer.
+        tone = 0.2 * np.cos(2 * np.pi * 200 * np.arange(rate // 10) / rate)
+        speech = np.concatenate([tone, np.zeros(rate // 5), tone])
+        paths = []
+        for index, (leading, trailing) in enumerate(((.2, .4), (.35, .2), (.15, .3))):
+            path = self.root / f"padded_{index}.wav"
+            sf.write(path, np.concatenate([np.zeros(round(leading * rate)), speech,
+                                          np.zeros(round(trailing * rate))]), rate, subtype="PCM_16")
+            paths.append(path)
+        output = self.root / "trimmed.wav"
+        duration = audio._concatenate_wavs(paths, [0, 0, 1], output)
+        samples, _ = sf.read(output)
+        block_frames = len(speech) + round(.08 * rate)
+        self.assertAlmostEqual(duration, 3 * block_frames / rate + .3 + .6, places=6)
+        self.assertEqual(len(samples), round(duration * rate))
+        first_end = block_frames
+        second_start = first_end + round(.3 * rate)
+        second_end = second_start + block_frames
+        self.assertTrue(np.all(samples[first_end:second_start] == 0))
+        self.assertTrue(np.all(samples[second_end:second_end + round(.6 * rate)] == 0))
+        # As margens de 40 ms permanecem; nenhuma fala ou pausa interna foi cortada.
+        margin = round(.04 * rate)
+        self.assertTrue(np.all(samples[:margin] == 0))
+        self.assertTrue(np.all(samples[round(.14 * rate):round(.34 * rate)] == 0))
+        self.assertGreater(abs(samples[margin + round(.05 * rate)]), .01)
+        self.assertGreater(abs(samples[margin + round(.35 * rate)]), .01)
+
+    def test_rms_leveling_reduces_volume_gap_without_clipping(self):
+        rate = 24000
+        paths = []
+        for index, amplitude in enumerate((.02, .2)):
+            path = self.root / f"level_{index}.wav"
+            sf.write(path, amplitude * np.cos(2 * np.pi * 200 * np.arange(rate) / rate),
+                     rate, subtype="PCM_16")
+            paths.append(path)
+        output = self.root / "leveled.wav"
+        self.assertAlmostEqual(audio._concatenate_wavs(paths, [0, 0], output), 2.3)
+        samples, _ = sf.read(output)
+        rms_quiet = np.sqrt(np.mean(samples[2400:21600] ** 2))
+        rms_loud = np.sqrt(np.mean(samples[33600:52800] ** 2))
+        self.assertLess(rms_loud / rms_quiet, 5)  # Antes: razão 10 (20 dB).
+        self.assertLessEqual(rms_quiet / (.02 / np.sqrt(2)), 2.01)  # Ganho <= 6 dB.
+        self.assertLessEqual(np.max(np.abs(samples)), 10 ** (-1 / 20) + 1 / 32768)
+
+    def test_peak_limit_preserves_transient_without_integer_overflow(self):
+        rate = 24000
+        quiet = .02 * np.cos(2 * np.pi * 200 * np.arange(rate) / rate)
+        quiet[rate // 2] = -1.0
+        paths = [self.root / "transient.wav", self.root / "loud.wav"]
+        sf.write(paths[0], quiet, rate, subtype="PCM_16")
+        sf.write(paths[1], .3 * np.cos(2 * np.pi * 200 * np.arange(rate) / rate),
+                 rate, subtype="PCM_16")
+        output = self.root / "limited.wav"
+        audio._concatenate_wavs(paths, [0, 0], output)
+        samples, _ = sf.read(output)
+        self.assertAlmostEqual(samples[rate // 2], -10 ** (-1 / 20), places=4)
+        self.assertLess(np.max(np.abs(samples)), .892)
+        # O bloco recebe um ganho constante; não há achatamento do transiente.
+        original, _ = sf.read(paths[0])
+        np.testing.assert_allclose(samples[2400:21600], original[2400:21600] * 10 ** (-1 / 20),
+                                   atol=1 / 32768)
+
+    def test_silent_and_very_short_blocks_are_safe(self):
+        paths = [self.root / "silent.wav", self.root / "one_sample.wav"]
+        sf.write(paths[0], np.zeros(4800), 24000, subtype="PCM_16")
+        sf.write(paths[1], [-1.0], 24000, subtype="PCM_16")
+        output = self.root / "short.wav"
+        duration = audio._concatenate_wavs(paths, [0, 0], output)
+        samples, _ = sf.read(output)
+        self.assertAlmostEqual(duration, .5 + 1 / 24000)
+        self.assertTrue(np.all(samples[:-1] == 0))
+        self.assertLess(abs(samples[-1]), .892)
+
+    def test_fades_across_streaming_buffers_preserve_duration_and_middle(self):
+        rate = 24000
+        source = self.root / "long.wav"
+        sf.write(source, np.full(round(2.3 * rate), .15), rate, subtype="PCM_16")
+        output = self.root / "long_faded.wav"
+        duration = audio._concatenate_wavs([source], [0], output)
+        samples, _ = sf.read(output)
+        original, _ = sf.read(source)
+        self.assertAlmostEqual(duration, 2.3)
+        self.assertEqual(len(samples), len(original))
+        self.assertEqual(samples[0], 0)
+        self.assertEqual(samples[-1], 0)
+        # Só as bordas têm rampa, incluindo quando o fim cai em outro buffer.
+        np.testing.assert_array_equal(samples[480:-480], original[480:-480])
+        self.assertTrue(np.all(np.diff(samples[:240]) >= 0))
+        self.assertTrue(np.all(np.diff(samples[-240:]) <= 0))
 
     @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg/ffprobe indisponível")
     def test_real_ffmpeg_and_progress(self):
@@ -95,8 +199,37 @@ class AudioPipelineTests(unittest.TestCase):
                                 "-of", "json", str(output)], capture_output=True, text=True, check=True)
         stream = json.loads(probe.stdout)["streams"][0]
         self.assertEqual((stream["codec_name"], stream["sample_rate"], stream["channels"], stream["bit_rate"]),
-                         ("mp3", "24000", 1, "128000"))
+                         ("mp3", "48000", 1, "192000"))
+        decoded = subprocess.run(
+            ["ffmpeg", "-v", "error", "-i", str(output), "-f", "f32le", "pipe:1"],
+            capture_output=True, check=True,
+        )
+        samples = np.frombuffer(decoded.stdout, dtype="<f4")
+        self.assertTrue(np.isfinite(samples).all())
+        self.assertGreater(np.max(np.abs(samples)), .001)
+        self.assertLess(np.max(np.abs(samples)), 1.0)
         self.assertEqual(list(self.root.glob(".ninecast_audio_*")), [])
+
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg/ffprobe indisponível")
+    def test_title_creates_unique_sanitized_name_and_id3_metadata(self):
+        existing = self.root / "algebra-cafe-aaaaaaaaaa.mp3"
+        existing.write_bytes(b"nao sobrescrever")
+        ids = [mock.Mock(hex="aaaaaaaaaa000000"), mock.Mock(hex="bbbbbbbbbb000000")]
+        with mock.patch.object(config, "PODCASTS_DIR", self.root), \
+             mock.patch.object(audio.uuid, "uuid4", side_effect=ids), \
+             mock.patch.object(audio.voice, "synthesize_speech", side_effect=fake_synthesis):
+            result = audio.generate_podcast("Conteúdo para narrar.", "Voz de teste",
+                                            episode_title="Álgebra & Café")
+        output = Path(result["output_path"])
+        self.assertEqual(output.name, "algebra-cafe-bbbbbbbbbb.mp3")
+        self.assertEqual(existing.read_bytes(), b"nao sobrescrever")
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format_tags=title,artist",
+             "-of", "json", str(output)], capture_output=True, text=True, check=True
+        )
+        tags = json.loads(probe.stdout)["format"]["tags"]
+        self.assertEqual(tags["title"], "Álgebra & Café")
+        self.assertEqual(tags["artist"], "Voz de teste")
 
     def test_cleanup_after_callback_and_ffmpeg_failure(self):
         output = self.root / "output.mp3"
