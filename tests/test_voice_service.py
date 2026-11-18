@@ -33,6 +33,27 @@ class FakeModel:
         return {"wav": np.full(24000, 0.1, dtype=np.float32)}
 
 
+class ModelLifecycleTests(unittest.TestCase):
+    def test_unload_clears_cache_and_loading_again_creates_new_model(self):
+        first, second = FakeModel(), FakeModel()
+        api = SimpleNamespace(TTS=mock.Mock(side_effect=[
+            mock.Mock(**{"to.return_value": SimpleNamespace(synthesizer=SimpleNamespace(tts_model=first))}),
+            mock.Mock(**{"to.return_value": SimpleNamespace(synthesizer=SimpleNamespace(tts_model=second))}),
+        ]))
+        with mock.patch.dict(sys.modules, {"TTS.api": api}), mock.patch.dict(os.environ), \
+             mock.patch.object(voice.torch, "set_num_threads"), mock.patch.object(voice, "_model", None), \
+             mock.patch.object(voice.gc, "collect") as collect:
+            self.assertFalse(voice.unload_model())
+            self.assertIs(voice._get_model(), first)
+            self.assertTrue(voice.unload_model())
+            self.assertIsNone(voice._model)
+            self.assertFalse(voice.unload_model())
+            collect.assert_called_once_with()
+            self.assertIs(voice._get_model(), second)
+            self.assertIs(voice._get_model(), second)
+            self.assertEqual(api.TTS.call_count, 2)
+
+
 class VoiceServiceTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()

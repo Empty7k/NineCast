@@ -1,5 +1,6 @@
 """Clonagem de voz local com XTTS-v2; o modelo é carregado sob demanda."""
 
+import gc
 import hashlib
 import os
 import tempfile
@@ -71,6 +72,17 @@ def _get_model():
             except Exception as exc:
                 raise RuntimeError(f"Não foi possível carregar o XTTS-v2: {exc}") from exc
         return _model
+
+
+def unload_model() -> bool:
+    """Libera a instância XTTS deste processo sem apagar os latentes em disco."""
+    global _model
+    with _lock:
+        if _model is None:
+            return False
+        _model = None
+        gc.collect()
+        return True
 
 
 def _fingerprints(paths: list[Path]) -> list[str]:
