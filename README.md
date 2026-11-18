@@ -1,32 +1,35 @@
 # NineCast
 
-Transforme seus conteúdos de estudo em episódios de podcast narrados localmente com clonagem de voz.
+Transforme seus conteúdos de estudo em episódios de podcast narrados localmente com clonagem de voz e preparação de roteiros com IA local.
 
 ## 1. Visão geral e proposta do NineCast
 
-O **NineCast** é uma aplicação pessoal, gratuita e open-source que converte anotações, resumos e apostilas em PDF em episódios de podcast em formato MP3, utilizando clonagem de voz baseada em **Coqui XTTS-v2** diretamente na **CPU**.
+O **NineCast** é uma aplicação pessoal, gratuita e open-source que converte anotações, resumos e apostilas em PDF em episódios de podcast em formato MP3, utilizando clonagem de voz baseada em **Coqui XTTS-v2** e preparação opcional de roteiros via **Ollama** diretamente na **CPU**.
 
-Todo o processamento — extração e limpeza de PDF, normalização pré-TTS em português, condicionamento da voz, síntese neural por blocos, pós-processamento acústico e biblioteca de episódios — acontece **100% na sua máquina**, sem envio de textos ou gravações para serviços externos e com servidor local restrito a `127.0.0.1`.
+Todo o processamento — extração e limpeza de PDF, preparação de roteiro com IA local, normalização pré-TTS em português, condicionamento da voz, síntese neural por blocos, pós-processamento acústico e biblioteca de episódios — acontece **100% na sua máquina**, sem envio de textos ou gravações para serviços externos e com servidor local restrito a `127.0.0.1`.
 
-### Destaques da versão `0.3.0`
-- **Masterização vocal e montagem sem artefatos:** remoção de *DC offset* e normalização de pico (`-1 dBFS`) nas referências de voz; aparo inteligente de silêncios nas pontas (margem de `40 ms`), nivelamento RMS suave entre blocos com proteção contra *clipping*, micro-fades de `12 ms` e cadeia FFmpeg com passa-altas (`80 Hz`), equalização suave, compressor dinâmico (`acompressor`) e `loudnorm` (`LRA=9`) exportando MP3 a **192 kbps mono em 48 kHz**.
-- **Normalização pré-TTS em português brasileiro:** converte automaticamente valores em reais (`R$`), porcentagens (`%`), datas válidas (`DD/MM/AAAA` e `DD/MM`, com ano bissexto e `"primeiro"` no dia `1`), ordinais (`º`/`ª`), números inteiros/decimais e símbolos de estudo (`§`, `§§`, `&`), preservando versões, IPs e códigos alfanuméricos.
-- **Limpeza de ruído na extração de PDF:** além de unir palavras hifenizadas entre linhas e preservar parágrafos via PyMuPDF, remove numeração solta de páginas, URLs brutas e cabeçalhos/rodapés repetidos em documentos multipágina.
-- **Usabilidade e biblioteca aprimoradas:** cadastro de voz aceitando de **1 a 5 amostras `.wav`**, título opcional do episódio (com nome de arquivo sanitizado e tags ID3 `title`/`artist`), bloqueio preventivo para textos acima de `MAX_TEXT_CHARS` (`50.000` caracteres) e exibição da duração (`mm:ss` via `ffprobe`) na biblioteca local sob demanda.
-- **Lançador portátil e integração com o desktop Linux:** script `ninecast.sh` com gerador opcional de atalho `.desktop` adaptável a qualquer diretório em que o projeto for clonado.
+### Destaques da versão `0.4.0`
+- **Preparação de roteiros com IA local (`services/llm.py` + Ollama):** novo painel **✨ Preparar roteiro com IA local** com os modos **Roteiro didático** e **Resumo de revisão**, remoção automática de citações acadêmicas, divisão segura em seções, proibição estrita de cálculos/invenções, sinalização de cortes (`truncated`) e validação obrigatória de modelo local via loopback (`127.0.0.1` / `localhost` / `[::1]`).
+- **Orquestração sequencial de memória RAM:** `voice.unload_model()` (`gc.collect()` + `malloc_trim(0)`) e `reserve_memory_for_llm()` liberam o XTTS-v2 (~3,4 GiB) antes de carregar o LLM no Ollama e forçam `keep_alive: 0` ao concluir, evitando que os dois modelos disputem os 16 GB de RAM ao mesmo tempo.
+- **Maior fidelidade à voz de referência (preparo v3 + masterização transparente):** filtro passa-altas de `75 Hz` nas referências, ponderação do `speaker_embedding` pela duração útil de cada amostra, renormalização L2, poda de sobras curtas (`< 2 s`) no condicionamento de estilo e cadeia FFmpeg transparente (`highpass=f=80`, `acompressor` e `loudnorm` `LRA=9`, sem equalizadores fixos) em **192 kbps mono a 48 kHz**.
+- **Base sólida das versões anteriores:** extração e limpeza de ruído em PDFs (PyMuPDF), normalização pré-TTS em PT-BR (`R$`, `%`, datas, ordinais, números, símbolos), 1 a 5 amostras `.wav`, títulos personalizados com tags ID3, duração `mm:ss` na biblioteca e lançador portátil Linux (`ninecast.sh`).
 
 ---
 
 ## 2. Pré-requisitos
 
-- **Sistema operacional:** Linux x86_64 (validado em CPU de 6 núcleos / 12 threads com 16 GB de RAM).
+- **Sistema operacional:** Linux x86_64 (validado em CPU Ryzen 5 PRO 5650U — 6 núcleos / 12 threads com 16 GB de RAM).
 - **Python:** `3.12` (definido em `.python-version`).
 - **Gerenciador de pacotes:** [uv](https://docs.astral.sh/uv/).
 - **FFmpeg:** instalado no sistema (incluindo `ffprobe`) e disponível no `PATH`:
   ```bash
   sudo apt update && sudo apt install -y ffmpeg
   ```
-- **Espaço livre em disco:** cerca de **2,5 GB** para o ambiente virtual e os pesos do modelo XTTS-v2 (baixados automaticamente em `data/models/` na primeira execução).
+- **Ollama *(opcional — necessário apenas para o recurso de preparação de roteiro com IA local)*:** instalado localmente e com um modelo leve em português baixado (testado com `qwen2.5:3b`):
+  ```bash
+  ollama pull qwen2.5:3b
+  ```
+- **Espaço livre em disco:** cerca de **2,5 GB** para `.venv` + XTTS-v2 (em `data/models/`) e mais **~2 GB** caso utilize o modelo `qwen2.5:3b` no Ollama.
 
 ---
 
@@ -48,16 +51,22 @@ Todo o processamento — extração e limpeza de PDF, normalização pré-TTS em
    ```bash
    cp .env.example .env
    ```
-   O arquivo `.env` é lido automaticamente por `config.py` e nunca é versionado. Nele você pode ajustar:
+   O arquivo `.env` é lido automaticamente por `config.py` e nunca é versionado. Principais variáveis:
    - `COQUI_TOS_AGREED=0` (mantenha `0` para exigir confirmação na interface ou `1` caso já tenha aceitado a licença não comercial CPML).
    - `DEFAULT_LANGUAGE=pt` (idioma padrão da síntese).
    - `MAX_TEXT_CHARS=50000` (limite máximo de caracteres por geração).
    - `XTTS_MAX_CHARS=220` (tamanho máximo de cada bloco enviado ao XTTS-v2).
-   - `CPU_THREADS=6` (quantidade de threads físicas usadas pelo PyTorch na CPU).
+   - `CPU_THREADS=6` (quantidade de threads físicas usadas pelo PyTorch e pelo Ollama na CPU).
+   - `OLLAMA_BASE_URL=http://127.0.0.1:11434` (URL HTTP local em loopback do Ollama).
+   - `OLLAMA_MODEL=qwen2.5:3b` (nome do modelo local no Ollama).
+   - `LLM_NUM_CTX=4096` (janela de contexto em tokens do Ollama).
+   - `LLM_MAX_SECTION_CHARS=3200` (limite de caracteres por seção enviada ao LLM).
 
 ---
 
 ## 4. Como executar o projeto
+
+*(Se for utilizar a preparação de roteiros com IA local, certifique-se de que o serviço do Ollama está ativo, por exemplo com `OLLAMA_NO_CLOUD=1 ollama serve`.)*
 
 ### Opção A — Lançador portátil (recomendado)
 Na raiz do repositório, execute:
@@ -91,8 +100,8 @@ Para criar um atalho gráfico local em `~/.local/share/applications/NineCast.des
 
 2. **Preparar o roteiro (Aba `🎙️ Novo Episódio`):**
    - *(Opcional)* Informe o **Título do episódio**, usado para compor o nome do arquivo MP3 e gravar os metadados ID3.
-   - Digite ou cole o texto diretamente no campo **Texto do episódio**, **ou**
-   - Abra **📄 Importar texto de PDF**, selecione um PDF com camada de texto e clique em **Extrair texto do PDF**. O conteúdo extraído (já sem cabeçalhos/rodapés repetidos, números de página soltos ou URLs brutas) preenche o editor para revisão antes de narrar.
+   - Digite/cole o texto no campo **Texto do episódio**, **ou** importe um arquivo com **📄 Importar texto de PDF**.
+   - *(Opcional)* Abra **✨ Preparar roteiro com IA local**, escolha entre **Roteiro didático (explicação para aula)** ou **Resumo de revisão** e clique em **Transformar roteiro com IA**. O texto gerado substitui o editor para que você revise antes de gerar o áudio (se o Ollama falhar, o material original permanece intacto no editor).
    - Acompanhe em tempo real os cartões de métricas com **Palavras**, **Blocos XTTS** (já considerando a expansão da normalização pré-TTS) e **Duração estimada**.
 
 3. **Gerar e ouvir o episódio:**
@@ -108,10 +117,11 @@ Para criar um atalho gráfico local em `~/.local/share/applications/NineCast.des
 
 ## 6. Explicação resumida da lógica e dos principais componentes
 
-- **[config.py](config.py):** Carrega variáveis do `.env` via `python-dotenv`, centraliza caminhos (`data/voices`, `data/podcasts`, `data/models`) e define parâmetros operacionais (`TTS_MODEL`, `DEFAULT_LANGUAGE`, `MAX_TEXT_CHARS`, `XTTS_MAX_CHARS`, `CPU_THREADS`).
-- **[services/voice.py](services/voice.py):** Gerencia o carregamento sob demanda (*lazy loading*) do modelo XTTS-v2 em CPU com `threading.RLock`. No preparo da referência (`_prepare_reference`), converte o áudio para mono, remove *DC offset*, encurta silêncios longos preservando pausas naturais de dicção (`< 0,35 s`), normaliza o pico para `-1 dBFS` e gera os tensores `gpt_cond_latent` e `speaker_embedding`, salvos de forma atômica em `<voz>.latents.pt` (`0600`). Na síntese (`synthesize_speech`), gera blocos WAV mono em `24 kHz` (`PCM_16`).
+- **[config.py](config.py):** Carrega variáveis do `.env` via `python-dotenv`, centraliza caminhos (`data/voices`, `data/podcasts`, `data/models`) e define parâmetros operacionais de áudio/TTS e LLM (`TTS_MODEL`, `DEFAULT_LANGUAGE`, `MAX_TEXT_CHARS`, `XTTS_MAX_CHARS`, `CPU_THREADS`, `OLLAMA_BASE_URL`, `OLLAMA_MODEL`, `LLM_NUM_CTX`, `LLM_MAX_SECTION_CHARS`).
+- **[services/llm.py](services/llm.py):** Integra com o Ollama exclusivamente em HTTP loopback (`LocalOllama`, sem redirecionamentos), valida pesos locais via `/api/show`, remove citações acadêmicas (`remove_citations`), divide textos longos em seções respeitando parágrafos/frases (`_sections`), reserva RAM via `voice.reserve_memory_for_llm()`, sinaliza cortes por limite de tokens (`done_reason == "length"`) e garante o descarregamento do modelo (`keep_alive: 0`) em bloco `finally`.
+- **[services/voice.py](services/voice.py):** Gerencia o carregamento sob demanda (*lazy loading*) e o descarregamento explícito (`unload_model()` com `gc.collect()` e `malloc_trim(0)`) do modelo XTTS-v2 em CPU com `threading.RLock`. No preparo das referências (`_prepare_reference` + `_extract_latents` + `_pool_reference_latents`), remove *DC offset*, aplica passa-altas de `75 Hz`, pondera o `speaker_embedding` pela duração útil de cada amostra com renormalização L2, poda apenas sobras finais curtas (`< 2 s`) no condicionamento de estilo e salva os latentes de forma atômica em `<voz>.latents.pt` (`0600`).
 - **[services/tts_text.py](services/tts_text.py):** Normaliza expressões numéricas e símbolos antes do fatiamento para o TTS (`R$`, `%`, datas válidas com ano bissexto, ordinais `º`/`ª`, inteiros, decimais e símbolos `§`, `§§`, `&`), preservando códigos, versões e identificadores com zeros à esquerda.
-- **[services/audio.py](services/audio.py):** Valida `MAX_TEXT_CHARS`, normaliza o texto para fala e divide-o por parágrafos e sentenças até `XTTS_MAX_CHARS` (`220` caracteres), protegendo abreviações em português e redistribuindo finais muito curtos (`< 20` caracteres). Na montagem (`_concatenate_wavs`), apara silêncios excedentes nas pontas preservando margem de `40 ms`, nivela o RMS ativo entre blocos (limitando o ganho a `+6 dB` e o pico a `-1 dBFS`), aplica fades de `12 ms` e insere pausas de `0,3 s` entre frases e `0,6 s` entre parágrafos. Exporta o MP3 final (`192 kbps`, mono, `48 kHz`) via FFmpeg com tags ID3 (`title` e `artist`) e filtros `highpass=f=80`, equalização, `acompressor` e `loudnorm=I=-16:TP=-1.5:LRA=9`.
+- **[services/audio.py](services/audio.py):** Valida `MAX_TEXT_CHARS`, normaliza o texto para fala e divide-o por parágrafos e sentenças até `XTTS_MAX_CHARS` (`220` caracteres), protegendo abreviações em português e redistribuindo finais muito curtos (`< 20` caracteres). Na montagem (`_concatenate_wavs`), apara silêncios excedentes nas pontas preservando margem de `40 ms`, nivela o RMS ativo entre blocos (limitando ganho a `+6 dB` e pico a `-1 dBFS`), aplica fades de `12 ms` e insere pausas de `0,3 s` entre frases e `0,6 s` entre parágrafos. Exporta MP3 (`192 kbps`, mono, `48 kHz`) via FFmpeg com tags ID3 (`title` e `artist`) e cadeia transparente (`highpass=f=80`, `acompressor`, `loudnorm=I=-16:TP=-1.5:LRA=9`).
 - **[services/content.py](services/content.py):** Extrai texto página a página com PyMuPDF (`pymupdf`), bloqueia PDFs vazios, corrompidos, protegidos por senha ou digitalizados sem OCR, remove cabeçalhos/rodapés repetidos, números de página isolados e URLs brutas, e une palavras hifenizadas entre linhas sem colar parágrafos distintos.
 - **[services/library.py](services/library.py):** Lista arquivos `.mp3` regulares em `data/podcasts/` ordenados do mais recente ao mais antigo, consulta duração (`mm:ss`) via `ffprobe` com fallback seguro (`--:--`) e realiza exclusão validando nomes contra *path traversal* e links simbólicos.
 - **[app.py](app.py) e [.streamlit/config.toml](.streamlit/config.toml):** Interface em Streamlit estruturada em cartões com tema escuro marítimo (*Atlântico Noturno*) e tratamento amigável de erros de validação e falta de memória (`MemoryError`).
@@ -129,17 +139,21 @@ NineCast/
 │   ├── audio.py               # Chunking, nivelamento RMS, fades WAV e masterização MP3 (FFmpeg)
 │   ├── content.py             # Extração e limpeza de ruído de arquivos PDF (PyMuPDF)
 │   ├── library.py             # Listagem com duração (ffprobe) e exclusão segura de episódios
+│   ├── llm.py                 # Preparação local de roteiros com Ollama e gestão de RAM
 │   ├── tts_text.py            # Normalização pré-TTS em português (R$, %, datas, números, símbolos)
-│   └── voice.py               # Condicionamento de voz, cache de latentes (.pt) e síntese XTTS-v2
+│   └── voice.py               # Condicionamento v3, cache de latentes (.pt), unload e síntese XTTS-v2
 ├── tests/
+│   ├── benchmark_llm.py       # Utilitário CLI para medir RAM, tokens/s e ciclo XTTS/Ollama
 │   ├── benchmark_xtts.py      # Utilitário CLI para medir RAM, tempo de carga e RTF em CPU
-│   ├── compare_xtts.py        # Utilitário CLI para comparar conjuntos de referências WAV
+│   ├── compare_xtts.py        # Utilitário CLI para comparar similaridade e timbre entre referências
 │   ├── test_app.py            # Testes automatizados da interface via Streamlit AppTest
 │   ├── test_audio_service.py  # Testes de normalização, chunking, nivelamento, fades e FFmpeg
+│   ├── test_benchmark_llm.py  # Testes unitários da sequência e descarga do benchmark LLM
 │   ├── test_content.py        # Testes de extração de PDF, limpeza de ruído, hífens e erros
 │   ├── test_launcher.py       # Testes do lançador ninecast.sh e geração do atalho .desktop
 │   ├── test_library.py        # Testes de ordenação, duração e exclusão segura da biblioteca
-│   └── test_voice_service.py  # Testes de preparo de referência, cache de latentes e síntese
+│   ├── test_llm_service.py    # Testes de loopback, validação local, seções e descarga Ollama
+│   └── test_voice_service.py  # Testes de preparo v3, ponderação/L2, unload e síntese
 ├── data/                      # Diretório local ignorado pelo Git (criado em tempo de execução)
 │   ├── models/                # Cache local dos pesos do XTTS-v2 e Hugging Face
 │   ├── podcasts/              # Episódios MP3 gerados
@@ -150,7 +164,7 @@ NineCast/
 ├── app.py                     # Aplicação principal Streamlit
 ├── config.py                  # Configurações e caminhos compartilhados
 ├── ninecast.sh                # Lançador portátil e instalador de atalho .desktop
-├── pyproject.toml             # Metadados do projeto e dependências (v0.3.0)
+├── pyproject.toml             # Metadados do projeto e dependências (v0.4.0)
 └── uv.lock                    # Lockfile determinístico de pacotes
 ```
 
@@ -158,7 +172,7 @@ NineCast/
 
 ## 8. Testes e validações
 
-Para executar toda a suíte de testes unitários e de interface (**54 testes**, rápida e sem exigir download do modelo XTTS-v2):
+Para executar toda a suíte de testes unitários e de interface (**75 testes**, rápida e sem exigir XTTS ou Ollama rodando):
 ```bash
 .venv/bin/python -m unittest discover -s tests -p "test_*.py" -v
 ```
@@ -169,6 +183,8 @@ Para executar módulos específicos:
 .venv/bin/python tests/test_audio_service.py
 .venv/bin/python tests/test_content.py
 .venv/bin/python tests/test_library.py
+.venv/bin/python tests/test_llm_service.py
+.venv/bin/python tests/test_benchmark_llm.py
 .venv/bin/python tests/test_launcher.py
 .venv/bin/python tests/test_app.py
 ```
@@ -183,23 +199,27 @@ COQUI_TOS_AGREED=1 .venv/bin/python tests/test_audio_service.py --integration
 ### Scripts de diagnóstico e benchmark
 ```bash
 .venv/bin/python tests/benchmark_xtts.py --speaker-wav /caminho/para/referencia.wav --agree-license
+.venv/bin/python tests/benchmark_llm.py --with-xttsCycle
 ```
 
 ---
 
 ## 9. Observações, limitações e requisitos atuais
 
-- **Desempenho em CPU:** Em um processador de 6 núcleos físicos (ex.: Ryzen 5 PRO 5650U com `CPU_THREADS=6`), o carregamento inicial do modelo leva ~12–15 s, o pico de memória fica em torno de **3,4 GB de RAM** e o *Real-Time Factor* (RTF) médio de síntese varia entre **1,7× e 2,5×** (cerca de 2 segundos de processamento para cada 1 segundo de fala gerada).
+- **Desempenho em CPU:** Em CPU de 6 núcleos físicos (Ryzen 5 PRO 5650U com `CPU_THREADS=6`):
+  - **XTTS-v2:** carregamento inicial em ~12–15 s, pico de ~3,4 GB de RAM e RTF médio de síntese ~2,5×.
+  - **Ollama (`qwen2.5:3b`, `num_ctx=4096`):** ~14–17 tokens/s, ~2,05 GiB líquidos durante a geração e liberação imediata após o fim da chamada.
+- **Limitações de modelos pequenos (3B) na preparação de roteiro:** Modelos compactos podem ocasionalmente parafrasear com perda de algum termo secundário ou simplificar demais um parágrafo. O texto gerado é sempre exibido para edição antes da síntese e **deve ser revisado** antes de gerar o episódio.
 - **Limite de roteiro:** Roteiros são limitados por padrão a `50.000` caracteres (`MAX_TEXT_CHARS`) para preservar estabilidade de memória em CPU.
 - **PDFs digitalizados (imagens):** A extração de PDF suporta apenas documentos com camada de texto selecionável. PDFs escaneados sem OCR retornam aviso orientando o usuário.
 - **Heurísticas de limpeza e hifenização:** A união de palavras hifenizadas e a remoção de cabeçalhos/rodapés repetidos operam por heurística textual; recomenda-se revisar o texto extraído na caixa de roteiro antes de iniciar a síntese.
 - **Player nativo do Streamlit:** O player HTML5 padrão carrega um episódio selecionado por vez na biblioteca para poupar RAM, mas ainda não oferece controles dedicados de velocidade de reprodução (`1.25x`/`1.5x`/`2x`) ou salto rápido de 15 segundos.
-- **Ética e Licença:** Clone apenas a sua própria voz ou vozes com permissão expressa do titular. Os pesos do modelo **XTTS-v2** são distribuídos sob a [Coqui Public Model License (CPML)](https://huggingface.co/coqui/XTTS-v2/blob/main/LICENSE.txt), restrita a uso **não comercial**.
+- **Ética e Licença:** Clone apenas a sua própria voz ou vozes com permissão expressa do titular. Os pesos do modelo **XTTS-v2** são distribuídos sob a [Coqui Public Model License (CPML)](https://huggingface.co/coqui/XTTS-v2/blob/main/LICENSE.txt), restrita a uso **não comercial**. Modelos baixados no Ollama seguem suas respectivas licenças (ex.: Apache 2.0 para `qwen2.5:3b`).
 
 ---
 
 ## 10. Futuras implementações previstas
 
-- **Integração com IA / LLM local (`v0.4.0`):** reescrita assistida e sumarização local de textos brutos ou apostilas em PDF para transformá-los automaticamente em roteiros didáticos com linguagem natural de podcast antes da narração.
-- **Evolução da interface e do player de estudo (`v0.5.0+`):** controles dedicados de velocidade de reprodução, avanço/retrocesso rápido, fila com cancelamento em segundo plano e migração da camada visual mantendo `services/` desacoplado.
+- **Evolução da interface e do player de estudo (`v0.5.0+`):** migração da interface para camada dedicada com player completo (controle de velocidade `1.25×`/`1.5×`/`2×`, salto rápido de ±15 s), streaming de áudio direto do disco e fila em segundo plano com cancelamento real, mantendo `services/` desacoplado.
 - **Suporte opcional a OCR local:** extração de texto para apostilas e livros digitalizados sem camada de texto selecionável.
+- **Perfis e estilos avançados de roteiro:** suporte a múltiplos formatos de estudo (ex.: perguntas e respostas de revisão, glossário narrado).

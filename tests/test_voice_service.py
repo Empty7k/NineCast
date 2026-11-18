@@ -25,9 +25,12 @@ class FakeModel:
         self.tokenizer = SimpleNamespace(encode=lambda text, lang: list(text))
         self.extractions = 0
 
-    def get_conditioning_latents(self, **kwargs):
+    def get_speaker_embedding(self, signal, rate):
+        return torch.ones(1, 3, 1)
+
+    def get_gpt_cond_latents(self, signal, rate, **kwargs):
         self.extractions += 1
-        return torch.ones(1, 2), torch.ones(1, 3)
+        return torch.ones(1, 2)
 
     def inference(self, **kwargs):
         return {"wav": np.full(24000, 0.1, dtype=np.float32)}
@@ -42,16 +45,67 @@ class ModelLifecycleTests(unittest.TestCase):
         ]))
         with mock.patch.dict(sys.modules, {"TTS.api": api}), mock.patch.dict(os.environ), \
              mock.patch.object(voice.torch, "set_num_threads"), mock.patch.object(voice, "_model", None), \
-             mock.patch.object(voice.gc, "collect") as collect:
+             mock.patch.object(voice.gc, "collect") as collect, \
+             mock.patch.object(voice.ctypes, "CDLL") as libc:
             self.assertFalse(voice.unload_model())
             self.assertIs(voice._get_model(), first)
             self.assertTrue(voice.unload_model())
             self.assertIsNone(voice._model)
             self.assertFalse(voice.unload_model())
             collect.assert_called_once_with()
+            libc.assert_called_once_with("libc.so.6")
+            libc.return_value.malloc_trim.assert_called_once_with(0)
             self.assertIs(voice._get_model(), second)
             self.assertIs(voice._get_model(), second)
             self.assertEqual(api.TTS.call_count, 2)
+
+    def test_unload_works_without_glibc_or_malloc_trim(self):
+        for error in (OSError(), AttributeError()):
+            with self.subTest(error=error), mock.patch.object(voice, "_model", FakeModel()), \
+                 mock.patch.object(voice.gc, "collect"), mock.patch.object(voice.ctypes, "CDLL", side_effect=error):
+                self.assertTrue(voice.unload_model())
+                self.assertIsNone(voice._model)
+
+
+class ConditioningTests(unittest.TestCase):
+    def test_duration_weighting_normalizes_channels_and_trims_only_style(self):
+        model = mock.Mock()
+        model.get_speaker_embedding.side_effect = [
+            torch.tensor([[[1.], [0.]]]), torch.tensor([[[0.], [1.]]]),
+        ]
+        rate = 100
+        signals = [torch.ones(1, 175), torch.ones(1, 525)]
+        style, speaker = voice._pool_reference_latents(model, signals, rate)
+        self.assertIs(style, model.get_gpt_cond_latents.return_value)
+        self.assertEqual(model.get_gpt_cond_latents.call_args.args[0].shape, (1, 600))
+        self.assertEqual(model.get_speaker_embedding.call_count, 2)
+        torch.testing.assert_close(speaker.flatten(), torch.tensor([1., 3.]) / 10 ** .5)
+        torch.testing.assert_close(speaker.norm(dim=1), torch.ones(1, 1))
+
+    def test_style_keeps_short_single_reference_or_two_second_tail(self):
+        for samples in (100, 600, 800):
+            with self.subTest(samples=samples):
+                model = mock.Mock()
+                model.get_speaker_embedding.return_value = torch.ones(1, 2, 1)
+                voice._pool_reference_latents(model, [torch.ones(1, samples)], 100)
+                self.assertEqual(model.get_gpt_cond_latents.call_args.args[0].size(-1), samples)
+
+    def test_filter_reduces_rumble_before_extracting_both_latents(self):
+        rate = 24000
+        time = np.arange(rate) / rate
+        samples = 0.2 * (np.sin(2 * np.pi * 30 * time) + np.sin(2 * np.pi * 200 * time))
+        model = mock.Mock()
+        model.get_speaker_embedding.return_value = torch.ones(1, 2, 1)
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "tons.wav"
+            sf.write(path, samples, rate, subtype="FLOAT")
+            voice._extract_latents(model, [path])
+        signal, conditioning_rate = model.get_speaker_embedding.call_args.args
+        self.assertEqual(conditioning_rate, 22050)
+        self.assertAlmostEqual(signal.abs().max().item(), 0.75, places=5)
+        spectrum = np.abs(np.fft.rfft(signal.numpy()[0]))
+        self.assertLess(spectrum[30] / spectrum[200], 0.2)
+        torch.testing.assert_close(model.get_gpt_cond_latents.call_args.args[0], signal)
 
 
 class VoiceServiceTests(unittest.TestCase):
@@ -75,7 +129,8 @@ class VoiceServiceTests(unittest.TestCase):
         voice.get_or_create_voice_latents("teste", [self.reference])
         self.assertEqual(self.fake.extractions, 1)
         self.assertEqual(voice.list_available_voices(), ["teste"])
-        with mock.patch.object(voice, "_prepare_reference", side_effect=AssertionError("reprocessou")):
+        with mock.patch.object(voice, "_prepare_reference", side_effect=AssertionError("reprocessou")), \
+             mock.patch.object(self.fake, "inference", wraps=self.fake.inference) as infer:
             for index in range(2):
                 result = voice.synthesize_speech("Olá, este é um teste.", "teste", self.root / f"{index}.wav")
                 self.assertEqual(result["audio_duration"], 1.0)
@@ -83,6 +138,9 @@ class VoiceServiceTests(unittest.TestCase):
             voice.get_or_create_voice_latents("teste", [self.reference])
         self.assertEqual(self.fake.extractions, 1)
         self.assertEqual(sf.info(self.root / "1.wav").samplerate, 24000)
+        params = infer.call_args.kwargs
+        self.assertEqual((params["temperature"], params["top_p"], params["top_k"], params["repetition_penalty"]),
+                         (0.70, 0.85, 50, 6.0))
 
     def test_changed_reference_invalidates_cache(self):
         voice.get_or_create_voice_latents("teste", [self.reference])
@@ -90,6 +148,19 @@ class VoiceServiceTests(unittest.TestCase):
         sf.write(self.reference, 0.1 * np.sin(2 * np.pi * 220 * t), 24000)
         voice.get_or_create_voice_latents("teste", [self.reference])
         self.assertEqual(self.fake.extractions, 2)
+
+    def test_v2_cache_is_upgraded_only_when_references_are_available(self):
+        voice.get_or_create_voice_latents("teste", [self.reference])
+        cache = config.VOICES_DIR / "teste.latents.pt"
+        data = torch.load(cache, weights_only=True)
+        data["preparation_version"] = 2
+        data["speaker_embedding"] = torch.zeros(1, 3, 1)
+        torch.save(data, cache)
+        _, previous = voice.get_or_create_voice_latents("teste")
+        self.assertEqual(previous.norm().item(), 0)
+        _, updated = voice.get_or_create_voice_latents("teste", [self.reference])
+        torch.testing.assert_close(updated.norm(), torch.tensor(1.0))
+        self.assertEqual(torch.load(cache, weights_only=True)["preparation_version"], 3)
 
     def test_legacy_cache_is_usable_and_rebuilt_when_references_are_supplied(self):
         voice.get_or_create_voice_latents("teste", [self.reference])

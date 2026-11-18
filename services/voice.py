@@ -1,11 +1,13 @@
 """Clonagem de voz local com XTTS-v2; o modelo é carregado sob demanda."""
 
+import ctypes
 import gc
 import hashlib
 import os
 import tempfile
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 import numpy as np
@@ -18,11 +20,9 @@ _model = None
 _lock = threading.RLock()
 _SAMPLE_RATE = 24000
 _CACHE_VERSION = 1
-_REFERENCE_PREPARATION_VERSION = 2
-_CONDITIONING = {
-    "max_ref_length": 30, "gpt_cond_len": -1, "gpt_cond_chunk_len": 6,
-    "sound_norm_refs": True, "librosa_trim_db": None,
-}
+_REFERENCE_PREPARATION_VERSION = 3
+_MAX_REF_SECONDS = 30
+_STYLE_CHUNK_SECONDS = 6
 _GENERATION = {
     "temperature": 0.70, "repetition_penalty": 6.0, "length_penalty": 1.0,
     "top_p": 0.85, "top_k": 50, "speed": 1.0, "enable_text_splitting": False,
@@ -82,7 +82,19 @@ def unload_model() -> bool:
             return False
         _model = None
         gc.collect()
+        try:
+            ctypes.CDLL("libc.so.6").malloc_trim(0)
+        except (OSError, AttributeError):
+            pass  # O alocador pode não oferecer malloc_trim.
         return True
+
+
+@contextmanager
+def reserve_memory_for_llm():
+    """Impede que outra sessão recarregue o XTTS durante a geração do roteiro."""
+    with _lock:
+        unload_model()
+        yield
 
 
 def _fingerprints(paths: list[Path]) -> list[str]:
@@ -121,7 +133,7 @@ def _prepare_reference(source: Path, destination: Path) -> None:
         else:
             merged.append((start, end))
     parts = []
-    remaining = rate * _CONDITIONING["max_ref_length"]
+    remaining = rate * _MAX_REF_SECONDS
     pause = np.zeros(round(rate * 0.15), dtype=np.float32)
     for start, end in merged:
         start, end = max(0, start - pad), min(len(audio), end + pad)
@@ -158,6 +170,39 @@ def _load_cache(path: Path) -> dict:
         return data
     except Exception as exc:
         raise ValueError(f"Cache de voz inválido em {path}; recrie a voz com as referências. Detalhes: {exc}") from exc
+
+
+def _pool_reference_latents(model, signals, rate):
+    """Pondera o locutor pela duração preparada e poda apenas a cauda curta do estilo."""
+    weighted = [model.get_speaker_embedding(signal, rate) * signal.size(-1) for signal in signals]
+    speaker = torch.stack(weighted).sum(0)
+    norm = torch.linalg.vector_norm(speaker, dim=1, keepdim=True)
+    if not torch.isfinite(norm).all() or (norm <= 1e-8).any():
+        raise ValueError("As referências não produziram um embedding de locutor válido.")
+    full = torch.cat(signals, dim=-1)
+    window = _STYLE_CHUNK_SECONDS * rate
+    tail = full.size(-1) % window
+    if full.size(-1) >= window and 0 < tail < 2 * rate:
+        full = full[:, :-tail]
+    style = model.get_gpt_cond_latents(full, rate, length=-1, chunk_length=_STYLE_CHUNK_SECONDS)
+    return style, speaker / norm
+
+
+def _extract_latents(model, prepared):
+    from torchaudio.functional import highpass_biquad, resample
+
+    rate = 22050  # Frequência usada pelo condicionamento GPT do XTTS.
+    signals = []
+    for path in prepared:
+        samples, native_rate = sf.read(path, dtype="float32")
+        filtered = highpass_biquad(torch.from_numpy(samples), native_rate, 75)
+        signal = resample(filtered.unsqueeze(0), native_rate, rate).clamp_(-1, 1)
+        signal = signal[:, :rate * _MAX_REF_SECONDS]
+        peak = signal.abs().max()
+        if not torch.isfinite(peak) or peak <= torch.finfo(signal.dtype).tiny:
+            raise ValueError("Áudio de referência sem sinal útil após a filtragem.")
+        signals.append(signal / peak * 0.75)
+    return _pool_reference_latents(model, signals, rate)
 
 
 def get_or_create_voice_latents(voice_name: str, speaker_wavs=None) -> tuple[torch.Tensor, torch.Tensor]:
@@ -198,7 +243,7 @@ def get_or_create_voice_latents(voice_name: str, speaker_wavs=None) -> tuple[tor
                     prepared.append(str(destination))
                 model = _get_model()
                 with torch.inference_mode():
-                    gpt, speaker = model.get_conditioning_latents(audio_path=prepared, **_CONDITIONING)
+                    gpt, speaker = _extract_latents(model, prepared)
                 data = {"version": _CACHE_VERSION, "model": config.TTS_MODEL,
                         "preparation_version": _REFERENCE_PREPARATION_VERSION,
                         "reference_hashes": hashes, "gpt_cond_latent": gpt.cpu(),

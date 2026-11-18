@@ -7,7 +7,43 @@ from pathlib import Path
 import streamlit as st
 
 import config
-from services import audio, content, library, voice
+from services import audio, content, library, llm, voice
+
+
+def prepare_script_with_ai() -> None:
+    modes = {"Roteiro didático (explicação para aula)": "didatico", "Resumo de revisão": "resumo"}
+    choice = st.radio("Modo de preparação", modes.keys(), key="script_mode")
+    st.caption(
+        f"O Ollama ({config.OLLAMA_MODEL}) roda neste computador. O roteiro preparado "
+        "substitui o texto do editor. Confira os dados e revise a explicação antes de narrar."
+    )
+    if not st.button("Transformar roteiro com IA", key="prepare_script"):
+        return
+    source = st.session_state.get("script_text", "")
+    if not source.strip():
+        st.error("Escreva um texto ou importe um PDF antes de preparar o roteiro.")
+        return
+    if len(source) > config.MAX_TEXT_CHARS:
+        st.error(f"O roteiro excede o limite de {config.MAX_TEXT_CHARS} caracteres. Reduza o texto e tente novamente.")
+        return
+
+    with st.status("Preparando roteiro com IA local...", expanded=True) as status:
+        progress = st.progress(0)
+
+        def section_processed(current: int, total: int) -> None:
+            progress.progress(current / total, text=f"Seção {current} de {total} processada")
+
+        try:
+            result = llm.generate_study_script(source, mode=modes[choice], progress_callback=section_processed)
+        except (ValueError, RuntimeError) as exc:
+            status.update(label="Falha ao preparar o roteiro", state="error", expanded=True)
+            st.error(str(exc))
+            return
+        status.update(label="Preparação concluída", state="complete", expanded=False)
+    st.session_state["script_text"] = result["script"]
+    if result["truncated"]:
+        st.warning("Parte do roteiro atingiu o limite de saída e pode estar incompleta. Revise os trechos antes de narrar.")
+    st.success("Roteiro preparado. Revise o texto no editor antes de gerar o áudio.")
 
 
 st.set_page_config(page_title="NineCast", page_icon="🎙️")
@@ -99,6 +135,8 @@ with tab_novo:
                         st.success("Texto extraído. Revise o roteiro abaixo.")
                     except (ValueError, RuntimeError) as exc:
                         st.error(f"Não foi possível extrair o PDF: {exc}")
+        with st.expander("✨ Preparar roteiro com IA local"):
+            prepare_script_with_ai()
         script = st.text_area("Texto do episódio", height=300, placeholder="Comece escrevendo seu roteiro aqui...", key="script_text")
         if script.strip():
             normalized_script = audio.normalize_text_for_tts(script)

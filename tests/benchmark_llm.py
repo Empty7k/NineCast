@@ -3,21 +3,16 @@
 import argparse
 import json
 import os
-import shlex
 import shutil
 import sys
-import time
 from pathlib import Path
-from urllib.error import HTTPError
-from urllib.request import ProxyHandler, Request, build_opener
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 import config
+from services import llm
 
-_BASE_URL = "http://127.0.0.1:11434"
-_HTTP = build_opener(ProxyHandler({}))
 _SCENARIOS = {
     "trecho_curto": (
         "Em 18/11/2026, uma turma reservou R$ 1.200,00 para um laboratório de redes. "
@@ -39,17 +34,6 @@ _SCENARIOS = {
         "O teste observa o estado final da tabela, que deve conter 30 matrículas (LIMA, 2022, p. 18)."
     ),
 }
-_MODES = {
-    "didatico": "Reescreva como roteiro didático, com explicações e transições claras para narração.",
-    "resumo": "Condense os conceitos essenciais em um roteiro curto de revisão para narração.",
-}
-
-
-def _request(endpoint: str, payload: dict | None = None, *, timeout: int = 5) -> dict:
-    body = None if payload is None else json.dumps(payload).encode("utf-8")
-    request = Request(_BASE_URL + endpoint, data=body, headers={"Content-Type": "application/json"})
-    with _HTTP.open(request, timeout=timeout) as response:
-        return json.load(response)
 
 
 def _available_mib() -> float:
@@ -60,32 +44,12 @@ def _available_mib() -> float:
     raise RuntimeError("MemAvailable não está disponível em /proc/meminfo.")
 
 
-def _model_name(name: str) -> str:
-    return name if ":" in name.rsplit("/", 1)[-1] else name + ":latest"
-
-
-def _wait_for_unload(model: str) -> None:
-    deadline = time.monotonic() + 10
-    while True:
-        running = _request("/api/ps")["models"]
-        if not any(
-            _model_name(name) == _model_name(model)
-            for entry in running
-            for name in (entry.get("name"), entry.get("model"))
-            if name
-        ):
-            return
-        if time.monotonic() >= deadline:
-            raise RuntimeError(f"{model} continua em /api/ps. Feche outras sessões e tente novamente.")
-        time.sleep(0.2)
-
-
-def _xtts_cycle(load_xtts: bool) -> dict:
+def _xtts_cycle(load_xtts: bool, client: llm.LocalOllama) -> dict:
     from services import voice
 
     memory_loaded = None
     if load_xtts:
-        if _request("/api/ps")["models"]:
+        if client.request("/api/ps")["models"]:
             raise RuntimeError("Descarregue os modelos listados em ollama ps antes de carregar o XTTS.")
         voice._get_model()
     try:
@@ -101,37 +65,19 @@ def _xtts_cycle(load_xtts: bool) -> dict:
     }
 
 
-def _run_scenario(name: str, source: str, args: argparse.Namespace) -> dict:
-    cycle = _xtts_cycle(args.load_xtts) if args.with_xtts_cycle else None
-    payload = {
-        "model": args.model,
-        "system": (
-            "Responda em português brasileiro. " + _MODES[args.mode] +
-            " Use somente fatos do material, preserve números, datas e identificadores técnicos. "
-            "Mantenha comandos de código exatos, sem traduzi-los, e omita citações bibliográficas "
-            "do texto falado. Entregue apenas o roteiro."
-        ),
-        "prompt": source,
-        "stream": False,
-        "keep_alive": 0 if args.with_xtts_cycle else "30s",
-        "options": {
-            "num_ctx": args.num_ctx,
-            "num_thread": args.threads,
-            "num_gpu": 0,
-            "num_predict": min(512, args.num_ctx // 4),
-            "temperature": 0.2,
-            "seed": 42,
-        },
-    }
+def _run_scenario(name: str, source: str, args: argparse.Namespace, client: llm.LocalOllama) -> dict:
+    cycle = _xtts_cycle(args.load_xtts, client) if args.with_xtts_cycle else None
+    payload = llm.generation_payload(llm.remove_citations(source), args.mode, args.model, args.num_ctx, args.threads,
+                                     0 if args.with_xtts_cycle else "30s")
     before = _available_mib()
-    result = _request("/api/generate", payload, timeout=300)
+    result = client.request("/api/generate", payload, timeout=300)
     model = result.get("model") or args.model
     try:
         after_generation = _available_mib()
     finally:
         if not args.with_xtts_cycle:
-            _request("/api/generate", {"model": model, "stream": False, "keep_alive": 0})
-    _wait_for_unload(model)
+            client.request("/api/generate", {"model": model, "stream": False, "keep_alive": 0})
+    client.wait_for_unload(model)
     after_unload = _available_mib()
 
     script = result.get("response")
@@ -167,10 +113,10 @@ def _run_scenario(name: str, source: str, args: argparse.Namespace) -> dict:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--model", default="qwen2.5:3b")
-    parser.add_argument("--num-ctx", type=int, default=4096)
+    parser.add_argument("--model", default=config.OLLAMA_MODEL)
+    parser.add_argument("--num-ctx", type=int, default=config.LLM_NUM_CTX)
     parser.add_argument("--threads", type=int, default=config.CPU_THREADS)
-    parser.add_argument("--mode", choices=tuple(_MODES), default="didatico")
+    parser.add_argument("--mode", choices=tuple(llm.MODES), default="didatico")
     parser.add_argument("--with-xttsCycle", dest="with_xtts_cycle", action="store_true",
                         help="Chama unload_model neste processo e gera com keep_alive=0.")
     parser.add_argument("--load-xtts", action="store_true",
@@ -184,25 +130,16 @@ def main() -> int:
         parser.error("Para carregar o XTTS, aceite sua licença e defina COQUI_TOS_AGREED=1.")
 
     try:
-        _request("/api/ps")
-        if args.load_xtts:
-            _request("/api/show", {"model": args.model})
+        client = llm.LocalOllama(config.OLLAMA_BASE_URL)
+        client.require_local_model(args.model)
         for name, source in _SCENARIOS.items():
             print(f"Executando cenário: {name}", file=sys.stderr, flush=True)
-            print(json.dumps(_run_scenario(name, source, args), ensure_ascii=False, indent=2), flush=True)
-    except HTTPError as exc:
-        with exc:
-            detail = exc.read(4096).decode("utf-8", errors="replace").strip()
-        if exc.code == 404 and exc.url.endswith(("/api/generate", "/api/show")):
-            print(f"Modelo indisponível. Baixe com: ollama pull {shlex.quote(args.model)}", file=sys.stderr)
-        else:
-            print(f"Ollama respondeu HTTP {exc.code}: {detail}", file=sys.stderr)
-        return 1
+            print(json.dumps(_run_scenario(name, source, args, client), ensure_ascii=False, indent=2), flush=True)
     except (OSError, ValueError, KeyError, TypeError, RuntimeError) as exc:
         print(f"Benchmark interrompido: {exc}", file=sys.stderr)
         if shutil.which("ollama") is None:
             print("Instale o Ollama no CachyOS com: sudo pacman -S ollama", file=sys.stderr)
-        print(f"Confira a API em {_BASE_URL} e inicie com: OLLAMA_NO_CLOUD=1 ollama serve",
+        print(f"Confira a API em {config.OLLAMA_BASE_URL} e inicie com: OLLAMA_NO_CLOUD=1 ollama serve",
               file=sys.stderr)
         return 1
     return 0

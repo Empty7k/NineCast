@@ -21,20 +21,20 @@ class BenchmarkLLMTests(unittest.TestCase):
                 events = mock.Mock()
                 events.memory.side_effect = [6400, 4000, 6300]
                 events.request.side_effect = [generation] if cycle else [generation, {}]
-                with mock.patch.multiple(benchmark_llm, _request=events.request,
-                                         _wait_for_unload=events.wait, _xtts_cycle=events.unload_xtts,
+                with mock.patch.multiple(benchmark_llm, _xtts_cycle=events.unload_xtts,
                                          _available_mib=events.memory):
-                    report = benchmark_llm._run_scenario("curto", "Material de estudo", args)
+                    report = benchmark_llm._run_scenario("curto", "Material de estudo", args, events)
                 methods = [call[0] for call in events.mock_calls]
                 self.assertEqual(methods, (
-                    ["unload_xtts", "memory", "request", "memory", "wait", "memory"] if cycle
-                    else ["memory", "request", "memory", "request", "wait", "memory"]
+                    ["unload_xtts", "memory", "request", "memory", "wait_for_unload", "memory"] if cycle
+                    else ["memory", "request", "memory", "request", "wait_for_unload", "memory"]
                 ))
                 endpoint, payload = events.request.call_args_list[0].args
                 self.assertEqual(endpoint, "/api/generate")
                 self.assertFalse(payload["stream"])
                 self.assertEqual(payload["keep_alive"], 0 if cycle else "30s")
                 self.assertEqual(payload["options"]["num_gpu"], 0)
+                self.assertEqual(payload["options"]["num_predict"], 1200)
                 if not cycle:
                     self.assertEqual(events.request.call_args.args, (
                         "/api/generate", {"model": args.model, "stream": False, "keep_alive": 0},
@@ -44,8 +44,9 @@ class BenchmarkLLMTests(unittest.TestCase):
 
     def test_unload_check_retries_while_target_is_listed(self):
         other = {"model": "outro:latest"}
-        with mock.patch.object(benchmark_llm, "_request", side_effect=[
+        client = benchmark_llm.llm.LocalOllama("http://localhost:11434")
+        with mock.patch.object(client, "request", side_effect=[
             {"models": [{"model": "modelo:latest"}, other]}, {"models": [other]},
-        ]) as request, mock.patch.object(benchmark_llm.time, "sleep"):
-            benchmark_llm._wait_for_unload("modelo")
+        ]) as request, mock.patch.object(benchmark_llm.llm.time, "sleep"):
+            client.wait_for_unload("modelo")
         self.assertEqual(request.call_args_list, [mock.call("/api/ps"), mock.call("/api/ps")])

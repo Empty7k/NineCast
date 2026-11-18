@@ -20,6 +20,10 @@ DEFAULT_LANGUAGE = os.getenv("DEFAULT_LANGUAGE", "pt")
 MAX_TEXT_CHARS = int(os.getenv("MAX_TEXT_CHARS", "50000"))
 XTTS_MAX_CHARS = int(os.getenv("XTTS_MAX_CHARS", "220"))
 CPU_THREADS = int(os.getenv("CPU_THREADS", "6"))
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:3b")
+LLM_NUM_CTX = int(os.getenv("LLM_NUM_CTX", "4096"))
+LLM_MAX_SECTION_CHARS = int(os.getenv("LLM_MAX_SECTION_CHARS", "3200"))
 
 
 def ensure_directories() -> None:

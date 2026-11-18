@@ -1,10 +1,11 @@
-"""Compara três conjuntos de referências com o Perfil B refinado, offline."""
+"""Compara conjuntos de referências ou mede similaridade de locutor em CPU, offline."""
 
 import argparse
 import json
 import os
 import random
 import resource
+import subprocess
 import sys
 import tempfile
 import time
@@ -85,15 +86,174 @@ def prepare_reference(path: Path, destination: Path) -> dict:
     }
 
 
-def reset_seed() -> None:
-    random.seed(SEED)
-    np.random.seed(SEED)
-    torch.manual_seed(SEED)
+def reset_seed(seed: int = SEED) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+
+
+# Baselines congelados para permitir repetir a comparação após mudar os padrões.
+EQ = ("highpass=f=80,equalizer=f=7000:t=q:w=1.5:g=-3,equalizer=f=3000:t=q:w=2:g=-1.5,"
+      "equalizer=f=200:t=q:w=1:g=1,")
+DYNAMICS = ("acompressor=threshold=0.125:ratio=2:attack=15:release=180:makeup=1:knee=2.828,"
+            "loudnorm=I=-16:TP=-1.5:LRA=9")
+FILTERS = {"eq": EQ + DYNAMICS, "transparente": "highpass=f=80," + DYNAMICS}
+PROFILES = {"base": SETTINGS, "ancorado": dict(SETTINGS, temperature=0.63, top_p=0.80,
+                                               top_k=35, repetition_penalty=7.5)}
+TRIALS = (
+    (42, "Quando lemos em voz alta, percebemos o ritmo de cada frase."),
+    (73, "Antes de alterar os dados, confira o resultado da consulta."),
+    (101, "Por que o céu muda de cor? A resposta depende de como a luz atravessa a atmosfera."),
+)
+VALIDATION_TRIALS = (
+    (37, "Um índice ajuda a encontrar o registro certo sem percorrer a tabela inteira."),
+    (89, "A primeira ideia parece simples. Vamos ouvir o exemplo antes de tirar uma conclusão."),
+)
+
+
+def weighted_latents(model, paths):
+    """Replica o carregamento do Coqui, com pesos em amostras e poda só no GPT."""
+    from services import voice
+    from TTS.tts.models.xtts import load_audio
+
+    rate = 22050
+    signals = []
+    for path in paths:
+        signal = load_audio(str(path), rate)[:, :30 * rate]
+        signals.append(signal / signal.abs().max() * 0.75)
+    return voice._pool_reference_latents(model, signals, rate)
+
+
+def embedding(model, path):
+    samples, rate = sf.read(path, dtype="float32", always_2d=True)
+    mono = torch.from_numpy(samples.mean(axis=1)).unsqueeze(0)
+    return model.get_speaker_embedding(mono, rate).flatten()
+
+
+def similarity(candidate, target):
+    return torch.nn.functional.cosine_similarity(candidate, target, dim=0).item()
+
+
+def measure_trial(model, gpt, speaker, settings, targets, output_dir, temporary, label, seed, text):
+    from services import audio
+
+    stem = f"{label}_{seed}"
+    reset_seed(seed)
+    started = time.perf_counter()
+    wav = model.inference(text=text, language="pt", gpt_cond_latent=gpt,
+                          speaker_embedding=speaker, **settings)["wav"]
+    elapsed = time.perf_counter() - started
+    if not np.isfinite(wav).all() or not np.any(wav):
+        raise ValueError(f"Saída vazia ou inválida: {stem}")
+    raw = output_dir / f"{stem}.wav"
+    sf.write(raw, wav, 24000, subtype="PCM_16")
+    raw_emb = embedding(model, raw)
+    mounted = temporary / "montagem.wav"
+    audio._concatenate_wavs([raw], [0], mounted)
+    row = {"variant": label, "seed": seed, "wav": similarity(raw_emb, targets[0]),
+           "wav_holdout": similarity(raw_emb, targets[1]), "duration": len(wav) / 24000,
+           "inference_seconds": elapsed, "clip_fraction": float(np.mean(np.abs(wav) >= 1)),
+           "speaker_norm": speaker.norm().item(), "mp3": {}}
+    row["rtf"] = elapsed / row["duration"]
+    for chain, filters in FILTERS.items():
+        mp3 = output_dir / f"{stem}_{chain}.mp3"
+        subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-n", "-i", str(mounted),
+                        "-af", filters, "-ac", "1", "-ar", "48000", "-c:a", "libmp3lame",
+                        "-b:a", "192k", str(mp3)], check=True)
+        encoded_emb = embedding(model, mp3)
+        row["mp3"][chain] = {"target": similarity(encoded_emb, targets[0]),
+                             "holdout": similarity(encoded_emb, targets[1])}
+    return row
+
+
+def summarize(report):
+    """Médias pareadas por texto; RTF agregado por duração bruta sintetizada."""
+    rows = report["rows"]
+    baseline_duration = {r["seed"]: r["duration"] for r in rows if r["variant"] == "base_base"}
+    summary = {}
+    for variant in dict.fromkeys(r["variant"] for r in rows):
+        group = [r for r in rows if r["variant"] == variant]
+        duration_ratios = [r["duration"] / baseline_duration[r["seed"]] for r in group]
+        summary[variant] = {
+            "wav": float(np.mean([r["wav"] for r in group])),
+            "wav_holdout": float(np.mean([r["wav_holdout"] for r in group])),
+            "rtf": sum(r["inference_seconds"] for r in group) / sum(r["duration"] for r in group),
+            "duration_ratio_range": [min(duration_ratios), max(duration_ratios)],
+            "max_raw_clip_fraction": max(r["clip_fraction"] for r in group),
+            "mp3": {chain: {target: float(np.mean([r["mp3"][chain][target] for r in group]))
+                            for target in ("target", "holdout")} for chain in FILTERS},
+        }
+    return summary
+
+
+def confirm_finalists(model, report, latents, targets, output_dir, temporary):
+    summary = summarize(report)
+    finalists = ["base_base"]
+    for target in ("target", "holdout"):
+        finalists.append(max(summary, key=lambda v: max(s[target] for s in summary[v]["mp3"].values())))
+    rows = []
+    for label in dict.fromkeys(finalists):
+        gpt, speaker, settings = latents[label]
+        for seed, text in VALIDATION_TRIALS:
+            rows.append(measure_trial(model, gpt, speaker, settings, targets, output_dir,
+                                      temporary, label, seed, text))
+    report["validation"] = {"trials": VALIDATION_TRIALS, "rows": rows, "summary": summarize({"rows": rows})}
+
+
+@torch.inference_mode()
+def measure_similarity(output_dir, model):
+    from torchaudio.functional import highpass_biquad
+    from services import voice
+
+    refs = REFERENCE_SETS["conjunto_1_grave_limpo"]
+    held_out = ["4.wav", "5.wav", "6.wav"]
+    report = {"references": refs, "held_out": held_out, "trials": TRIALS, "profiles": PROFILES,
+              "filters": FILTERS, "threads": config.CPU_THREADS, "reference_seconds": {}, "rows": []}
+    with tempfile.TemporaryDirectory(dir=output_dir) as directory:
+        temporary = Path(directory)
+        for name in refs + held_out:
+            voice._prepare_reference(config.VOICES_DIR / name, temporary / name)
+        paths = [temporary / name for name in refs]
+        report["reference_seconds"] = {path.name: sf.info(path).duration for path in paths}
+        targets = [torch.stack([embedding(model, temporary / name) for name in group]).mean(0)
+                   for group in (refs, held_out)]
+        latents = {}
+        for hp in (False, True):
+            prepared = []
+            for path in paths:
+                if hp:
+                    samples, rate = sf.read(path, dtype="float32")
+                    filtered = highpass_biquad(torch.from_numpy(samples), rate, 75)
+                    path = temporary / ("hp_" + path.name)
+                    sf.write(path, filtered.numpy(), rate, subtype="FLOAT")
+                prepared.append(str(path))
+            baseline = model.get_conditioning_latents(audio_path=prepared, **CONDITIONING)
+            weighted = weighted_latents(model, prepared)
+            variants = {"base": baseline, "ponderada": weighted}
+            if not hp:
+                # Isola os efeitos do vetor do locutor e da poda de estilo no perfil original.
+                variants["so_locutor"] = (baseline[0], weighted[1])
+                variants["so_poda"] = (weighted[0], baseline[1])
+            for weighting, (gpt, speaker) in variants.items():
+                profiles = {"base": SETTINGS} if weighting.startswith("so_") else PROFILES
+                for profile, settings in profiles.items():
+                    label = f"{weighting}{'_hp75' if hp else ''}_{profile}"
+                    latents[label] = (gpt, speaker, settings)
+                    for seed, text in TRIALS:
+                        row = measure_trial(model, gpt, speaker, settings, targets, output_dir,
+                                            temporary, label, seed, text)
+                        report["rows"].append(row)
+                        print(f"{label}_{seed} cos={row['wav']:.3f} RTF={row['rtf']:.2f}", flush=True)
+        confirm_finalists(model, report, latents, targets, output_dir, temporary)
+    report["summary"] = summarize(report)
+    (output_dir / "metricas.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+    print(json.dumps(report["summary"], indent=2), flush=True)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--agree-license", action="store_true", help="Aceita os termos não comerciais da CPML.")
+    parser.add_argument("--similarity", action="store_true", help="Compara condicionamento, inferência e masterização.")
     args = parser.parse_args()
     if args.agree_license:
         os.environ["COQUI_TOS_AGREED"] = "1"
@@ -125,6 +285,10 @@ def main() -> None:
     load_seconds = time.perf_counter() - started
     print(f"Modelo carregado em {load_seconds:.2f} s", flush=True)
     model = tts.synthesizer.tts_model
+    if args.similarity:
+        print(f"Comparação: {output_dir}", flush=True)
+        measure_similarity(output_dir, model)
+        return
     report = {
         "text": TEXT, "seed": SEED, "threads": config.CPU_THREADS, "device": "cpu",
         "model": config.TTS_MODEL, "conditioning": CONDITIONING,

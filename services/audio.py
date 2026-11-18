@@ -20,9 +20,6 @@ normalize_text_for_tts = tts_text.normalize_text_for_tts
 
 _FILTERS = (
     "highpass=f=80,"
-    "equalizer=f=7000:t=q:w=1.5:g=-3,"
-    "equalizer=f=3000:t=q:w=2:g=-1.5,"
-    "equalizer=f=200:t=q:w=1:g=1,"
     "acompressor=threshold=0.125:ratio=2:attack=15:release=180:makeup=1:knee=2.828,"
     "loudnorm=I=-16:TP=-1.5:LRA=9"
 )
