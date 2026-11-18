@@ -101,8 +101,9 @@ with tab_novo:
                         st.error(f"Não foi possível extrair o PDF: {exc}")
         script = st.text_area("Texto do episódio", height=300, placeholder="Comece escrevendo seu roteiro aqui...", key="script_text")
         if script.strip():
+            normalized_script = audio.normalize_text_for_tts(script)
             words = len(script.split())
-            chunks = audio.split_text_into_chunks(script)
+            chunks = audio.split_text_into_chunks(normalized_script) if normalized_script.strip() else []
             estimated_minutes = words / 150
             columns = st.columns(3)
             columns[0].metric("Palavras", words)

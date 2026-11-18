@@ -109,6 +109,13 @@ class AppTests(unittest.TestCase):
             self.assertEqual(metrics["Palavras"], str(len(script.split())))
             self.assertEqual(metrics["Blocos XTTS"], "2")
             self.assertEqual(metrics["Duração estimada"], f"~{len(script.split()) / 150:.1f} min")
+            expanding = " ".join(["R$ 123.456,78"] * 6)
+            app.text_area[0].input(expanding).run()
+            metrics = {item.label: item.value for item in app.metric}
+            self.assertEqual(
+                metrics["Blocos XTTS"],
+                str(len(audio.split_text_into_chunks(audio.normalize_text_for_tts(expanding)))),
+            )
 
     def test_generate_and_keep_result_after_interaction(self):
         podcast = self.root / "teste.mp3"
