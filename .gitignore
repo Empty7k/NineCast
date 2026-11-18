@@ -21,6 +21,7 @@ data/
 
 # Model and application caches
 .cache/
+graphify-out/
 
 # Editors and operating systems
 .idea/
@@ -29,6 +30,7 @@ data/
 Thumbs.db
 
 # Local development-agent metadata
+AGENTS.md
 .agents/
 .aws/
 .codex/

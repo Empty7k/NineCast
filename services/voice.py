@@ -17,6 +17,7 @@ _model = None
 _lock = threading.RLock()
 _SAMPLE_RATE = 24000
 _CACHE_VERSION = 1
+_REFERENCE_PREPARATION_VERSION = 2
 _CONDITIONING = {
     "max_ref_length": 30, "gpt_cond_len": -1, "gpt_cond_chunk_len": 6,
     "sound_norm_refs": True, "librosa_trim_db": None,
@@ -83,7 +84,7 @@ def _fingerprints(paths: list[Path]) -> list[str]:
 
 
 def _prepare_reference(source: Path, destination: Path) -> None:
-    """Reduz pausas longas em uma cópia, preservando as referências originais."""
+    """Remove DC, reduz pausas e normaliza uma cópia para pico de -1 dBFS."""
     import librosa
 
     try:
@@ -93,6 +94,10 @@ def _prepare_reference(source: Path, destination: Path) -> None:
     audio = audio.mean(axis=1)
     if not audio.size or not np.isfinite(audio).all() or not np.any(audio):
         raise ValueError(f"Áudio de referência vazio, silencioso ou inválido: {source}")
+    # Antes da detecção de fala, pois um offset pode esconder os silêncios.
+    audio = audio - np.mean(audio, dtype=np.float64)
+    if not np.any(audio):
+        raise ValueError(f"Áudio de referência sem sinal útil após remover DC: {source}")
     intervals = librosa.effects.split(audio, top_db=30)
     pad = round(rate * 0.03)
     minimum_gap = round(rate * 0.35)
@@ -120,7 +125,14 @@ def _prepare_reference(source: Path, destination: Path) -> None:
             break
     if not parts or sum(len(p) for p in parts) < rate * 0.33:
         raise ValueError(f"Áudio de referência curto demais após o preparo: {source}")
-    sf.write(destination, np.concatenate(parts), rate, subtype="FLOAT")
+    prepared = np.concatenate(parts)
+    # Os cortes podem mudar a média; recentra antes de definir o pico final.
+    prepared = prepared - np.mean(prepared, dtype=np.float64)
+    peak = np.max(np.abs(prepared))
+    if peak <= np.finfo(np.float32).tiny:
+        raise ValueError(f"Áudio de referência sem sinal útil após o preparo: {source}")
+    prepared = (prepared / peak) * 10 ** (-1 / 20)
+    sf.write(destination, prepared, rate, subtype="FLOAT")
 
 
 def _load_cache(path: Path) -> dict:
@@ -156,7 +168,10 @@ def get_or_create_voice_latents(voice_name: str, speaker_wavs=None) -> tuple[tor
                     if not paths:
                         raise
                 else:
-                    if hashes is None or data.get("reference_hashes") == hashes:
+                    if hashes is None or (
+                        data.get("reference_hashes") == hashes
+                        and data.get("preparation_version") == _REFERENCE_PREPARATION_VERSION
+                    ):
                         return data["gpt_cond_latent"], data["speaker_embedding"]
             if not paths:
                 raise FileNotFoundError(f"A voz '{voice_name}' não tem cache nem referências. Informe arquivos WAV para criá-la.")
@@ -173,6 +188,7 @@ def get_or_create_voice_latents(voice_name: str, speaker_wavs=None) -> tuple[tor
                 with torch.inference_mode():
                     gpt, speaker = model.get_conditioning_latents(audio_path=prepared, **_CONDITIONING)
                 data = {"version": _CACHE_VERSION, "model": config.TTS_MODEL,
+                        "preparation_version": _REFERENCE_PREPARATION_VERSION,
                         "reference_hashes": hashes, "gpt_cond_latent": gpt.cpu(),
                         "speaker_embedding": speaker.cpu()}
                 # O arquivo temporário privado evita deixar um cache incompleto.

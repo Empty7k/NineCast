@@ -33,7 +33,12 @@ with st.sidebar:
 
     with st.expander("➕ Adicionar nova voz autorizada"):
         new_voice_name = st.text_input("Nome da voz")
-        uploaded = st.file_uploader("Arquivo de referência (.wav)", type=["wav"])
+        uploaded = st.file_uploader(
+            "Arquivos de referência (.wav)",
+            type=["wav"],
+            accept_multiple_files=True,
+            help="Selecione entre 1 e 5 amostras da mesma voz.",
+        )
         register_voice = st.button("Cadastrar voz")
 
     license_accepted = st.checkbox(
@@ -43,8 +48,10 @@ with st.sidebar:
     st.markdown("[Consultar licença do modelo](https://huggingface.co/coqui/XTTS-v2/blob/main/LICENSE.txt)")
 
     if register_voice:
-        if not new_voice_name.strip() or uploaded is None:
-            st.error("Informe o nome da voz e selecione um arquivo WAV.")
+        if not new_voice_name.strip() or not uploaded:
+            st.error("Informe o nome da voz e selecione de 1 a 5 arquivos WAV.")
+        elif len(uploaded) > 5:
+            st.error("Selecione no máximo 5 arquivos WAV para uma voz.")
         elif not license_accepted:
             st.error("Leia e aceite a licença do XTTS-v2 antes de cadastrar a voz.")
         elif new_voice_name in voice.list_available_voices():
@@ -56,9 +63,12 @@ with st.sidebar:
                 os.environ["COQUI_TOS_AGREED"] = "1"
                 with st.spinner("Preparando a voz. O primeiro carregamento pode demorar..."):
                     with tempfile.TemporaryDirectory(prefix="ninecast_upload_", dir=config.VOICES_DIR) as directory:
-                        reference = Path(directory) / "referencia.wav"
-                        reference.write_bytes(uploaded.getvalue())
-                        voice.get_or_create_voice_latents(new_voice_name, [reference])
+                        references = []
+                        for index, sample in enumerate(uploaded, start=1):
+                            reference = Path(directory) / f"referencia_{index:02d}.wav"
+                            reference.write_bytes(sample.getvalue())
+                            references.append(reference)
+                        voice.get_or_create_voice_latents(new_voice_name, references)
                 st.session_state["pending_voice"] = new_voice_name
                 st.session_state["voice_success"] = f"Voz '{new_voice_name}' cadastrada com sucesso."
                 st.rerun()
@@ -73,6 +83,10 @@ with tab_novo:
     with st.container(border=True):
         st.subheader("Seu roteiro")
         st.caption("Escreva ou cole o texto que deseja narrar e revise-o antes da geração.")
+        episode_title = st.text_input(
+            "Título do episódio (opcional)",
+            placeholder="Ex.: Introdução a bancos de dados",
+        )
         with st.expander("📄 Importar texto de PDF"):
             pdf = st.file_uploader("Documento PDF", type=["pdf"])
             st.caption("A extração é local. O texto importado substituirá o roteiro atual; revise-o antes de gerar áudio.")
@@ -87,17 +101,28 @@ with tab_novo:
                         st.error(f"Não foi possível extrair o PDF: {exc}")
         script = st.text_area("Texto do episódio", height=300, placeholder="Comece escrevendo seu roteiro aqui...", key="script_text")
         if script.strip():
+            normalized_script = audio.normalize_text_for_tts(script)
             words = len(script.split())
-            chunks = audio.split_text_into_chunks(script)
+            chunks = audio.split_text_into_chunks(normalized_script) if normalized_script.strip() else []
             estimated_minutes = words / 150
             columns = st.columns(3)
             columns[0].metric("Palavras", words)
             columns[1].metric("Blocos XTTS", len(chunks))
             columns[2].metric("Duração estimada", f"~{estimated_minutes:.1f} min")
+            if len(script) > config.MAX_TEXT_CHARS:
+                st.warning(
+                    f"O roteiro tem {len(script)} caracteres e excede o limite de "
+                    f"{config.MAX_TEXT_CHARS}. Reduza o texto antes de gerar."
+                )
 
     if st.button("🎙️ Gerar Podcast", type="primary"):
         if not script.strip():
             st.error("Escreva um texto para gerar o podcast.")
+        elif len(script) > config.MAX_TEXT_CHARS:
+            st.error(
+                f"O roteiro excede o limite de {config.MAX_TEXT_CHARS} caracteres. "
+                "Reduza o texto antes de iniciar a síntese."
+            )
         elif not selected_voice:
             st.error("Cadastre e selecione uma voz antes de gerar o podcast.")
         elif not license_accepted:
@@ -113,7 +138,12 @@ with tab_novo:
                       if current == total:
                           status.update(label="Finalizando e exportando o MP3...")
 
-                  result = audio.generate_podcast(script, selected_voice, progress_callback=update_progress)
+                  result = audio.generate_podcast(
+                      script,
+                      selected_voice,
+                      progress_callback=update_progress,
+                      episode_title=episode_title,
+                  )
                   st.session_state["last_episode"] = result
                   status.update(label="Podcast gerado com sucesso!", state="complete", expanded=False)
                 except MemoryError:
@@ -133,7 +163,7 @@ with tab_novo:
                     st.subheader("Seu podcast")
                     st.audio(episode_bytes, format="audio/mp3")
                     st.download_button("⬇️ Baixar Podcast (.mp3)", data=episode_bytes,
-                                       file_name="meu_podcast.mp3", mime="audio/mp3")
+                                       file_name=path.name, mime="audio/mp3")
                     columns = st.columns(3)
                     columns[0].metric("Duração", f"{result['audio_duration']:.1f} s")
                     columns[1].metric("Geração", f"{result['total_seconds']:.1f} s")
@@ -158,7 +188,10 @@ with tab_biblioteca:
         name = episode["filename"]
         with st.container(border=True):
             st.subheader(name)
-            st.caption(f"Modificado em {episode['created_at']} · {episode['size_mb']:.2f} MB")
+            st.caption(
+                f"Modificado em {episode['created_at']} · {episode['size_mb']:.2f} MB · "
+                f"{episode['duration']}"
+            )
             try:
                 st.audio(str(episode["path"]), format="audio/mp3")
                 with episode["path"].open("rb") as audio_file:
