@@ -234,8 +234,14 @@ class AudioPipelineTests(unittest.TestCase):
         text = "Primeiro parágrafo com conteúdo para teste.\nSegundo parágrafo para validar a montagem."
         output = self.root / "episódio teste.mp3"
         updates = []
-        with mock.patch.object(audio.voice, "synthesize_speech", side_effect=fake_synthesis):
+        with mock.patch.object(audio.voice, "synthesize_speech", side_effect=fake_synthesis), \
+             mock.patch.object(audio.subprocess, "run", wraps=subprocess.run) as encode:
             result = audio.generate_podcast(text, "voz", output, lambda n, total: updates.append((n, total)))
+        command = encode.call_args.args[0]
+        chain = command[command.index("-af") + 1]
+        self.assertEqual([item.split("=")[0] for item in chain.split(",")], ["highpass", "acompressor", "loudnorm"])
+        self.assertIn("highpass=f=80", chain)
+        self.assertIn("loudnorm=I=-16:TP=-1.5:LRA=9", chain)
         self.assertEqual(updates, [(1, 2), (2, 2)])
         self.assertEqual(result["chunk_count"], 2)
         self.assertAlmostEqual(result["audio_duration"], .8, places=3)

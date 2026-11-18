@@ -12,7 +12,7 @@ sys.path.insert(0, str(ROOT))
 from streamlit.testing.v1 import AppTest
 
 import config
-from services import audio, library, voice
+from services import audio, library, llm, voice
 
 
 class AppTests(unittest.TestCase):
@@ -87,6 +87,57 @@ class AppTests(unittest.TestCase):
             self.assertEqual(app.text_area[0].value, "Texto extraído")
             app.text_area[0].input("Texto revisado").run()
             self.assertEqual(app.text_area[0].value, "Texto revisado")
+
+    def test_ai_prepares_editable_script_in_both_modes(self):
+        source = "Material digitado no editor."
+        for label, mode, truncated in (
+            ("Roteiro didático (explicação para aula)", "didatico", False),
+            ("Resumo de revisão", "resumo", True),
+        ):
+            with self.subTest(mode=mode), mock.patch.object(llm, "generate_study_script") as generate:
+                def transform(text, mode, progress_callback):
+                    progress_callback(1, 2)
+                    progress_callback(2, 2)
+                    return {"script": f"Roteiro {mode}.", "truncated": truncated}
+
+                generate.side_effect = transform
+                app = self.app().run()
+                app.text_area(key="script_text").input(source)
+                app.radio(key="script_mode").set_value(label)
+                app.button(key="prepare_script").click().run()
+                self.assertFalse(app.exception)
+                generate.assert_called_once_with(source, mode=mode, progress_callback=mock.ANY)
+                self.assertEqual(app.text_area(key="script_text").value, f"Roteiro {mode}.")
+                self.assertEqual(app.get("progress")[0].proto.text, "Seção 2 de 2 processada")
+                self.assertTrue(any("Revise o texto" in item.value for item in app.success))
+                self.assertEqual(any("limite de saída" in item.value for item in app.warning), truncated)
+                app.text_area(key="script_text").input("Minha revisão.").run()
+                self.assertEqual(app.text_area(key="script_text").value, "Minha revisão.")
+                self.assertEqual(generate.call_count, 1)
+
+    def test_ai_rejects_empty_or_oversized_text_before_generation(self):
+        with mock.patch.object(config, "MAX_TEXT_CHARS", 10), mock.patch.object(llm, "generate_study_script") as generate:
+            app = self.app().run()
+            for text, message in (("   ", "Escreva um texto"), ("1234567890 ", "limite de 10")):
+                with self.subTest(text=text):
+                    app.text_area(key="script_text").input(text)
+                    app.button(key="prepare_script").click().run()
+                    self.assertFalse(app.exception)
+                    self.assertTrue(any(message in item.value for item in app.error))
+                    self.assertEqual(app.text_area(key="script_text").value, text)
+            generate.assert_not_called()
+
+    def test_ai_error_preserves_source_in_editor(self):
+        for error in (RuntimeError("Ollama inacessível. Inicie com ollama serve."),
+                      ValueError("O material contém apenas referências bibliográficas.")):
+            with self.subTest(error=error), mock.patch.object(llm, "generate_study_script", side_effect=error):
+                app = self.app().run()
+                app.text_area(key="script_text").input("Roteiro original.")
+                app.button(key="prepare_script").click().run()
+                self.assertFalse(app.exception)
+                self.assertTrue(any(str(error) in item.value for item in app.error))
+                self.assertFalse(app.success)
+                self.assertEqual(app.text_area(key="script_text").value, "Roteiro original.")
 
     def test_render_with_and_without_voices(self):
         with mock.patch.object(voice, "list_available_voices", return_value=[]):
