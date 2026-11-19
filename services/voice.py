@@ -90,10 +90,11 @@ def unload_model() -> bool:
 
 
 @contextmanager
-def reserve_memory_for_llm():
+def reserve_memory_for_llm(*, unload: bool = True):
     """Impede que outra sessão recarregue o XTTS durante a geração do roteiro."""
     with _lock:
-        unload_model()
+        if unload:
+            unload_model()
         yield
 
 

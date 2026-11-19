@@ -13,8 +13,28 @@ from services import audio, content, library, llm, voice
 def prepare_script_with_ai() -> None:
     modes = {"Roteiro didático (explicação para aula)": "didatico", "Resumo de revisão": "resumo"}
     choice = st.radio("Modo de preparação", modes.keys(), key="script_mode")
+    if st.button("Atualizar modelos locais", key="refresh_models"):
+        try:
+            with st.spinner("Consultando modelos do Ollama..."):
+                st.session_state["local_models"] = llm.list_local_models(start_server=True)
+            if not st.session_state["local_models"]:
+                st.info("Nenhum modelo local encontrado. Baixe um modelo com ollama pull.")
+        except (ValueError, RuntimeError) as exc:
+            st.error(str(exc))
+    models = {entry["name"]: entry["size_bytes"] for entry in st.session_state.get("local_models", [])}
+    models.setdefault(config.OLLAMA_MODEL, None)
+    if st.session_state.get("script_model") not in models:
+        st.session_state["script_model"] = config.OLLAMA_MODEL
+    selected_model = st.selectbox("Modelo local", models.keys(), key="script_model")
+    description = llm.describe_model(selected_model, models[selected_model])
+    st.caption(f"{description['tier']} · RAM {description['ram_estimada']} · CPU {description['velocidade_cpu']}")
+    st.write(f"**Vantagens** · {description['vantagens']}")
+    st.write(f"**Desvantagens** · {description['desvantagens']}")
+    st.caption(description["recomendado_para"])
+    if description["alerta_memoria"]:
+        st.warning(description["alerta_memoria"])
     st.caption(
-        f"O Ollama ({config.OLLAMA_MODEL}) roda neste computador. O roteiro preparado "
+        "O Ollama roda neste computador. O roteiro preparado "
         "substitui o texto do editor. Confira os dados e revise a explicação antes de narrar."
     )
     if not st.button("Transformar roteiro com IA", key="prepare_script"):
@@ -34,7 +54,9 @@ def prepare_script_with_ai() -> None:
             progress.progress(current / total, text=f"Seção {current} de {total} processada")
 
         try:
-            result = llm.generate_study_script(source, mode=modes[choice], progress_callback=section_processed)
+            result = llm.generate_study_script(
+                source, mode=modes[choice], model=selected_model, progress_callback=section_processed,
+            )
         except (ValueError, RuntimeError) as exc:
             status.update(label="Falha ao preparar o roteiro", state="error", expanded=True)
             st.error(str(exc))

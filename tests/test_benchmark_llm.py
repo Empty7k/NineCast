@@ -1,6 +1,7 @@
 """Valida a sequência do benchmark sem servidor ou modelos baixados."""
 
 import argparse
+from contextlib import nullcontext
 import unittest
 from unittest import mock
 
@@ -17,21 +18,26 @@ class BenchmarkLLMTests(unittest.TestCase):
         for cycle in (False, True):
             with self.subTest(cycle=cycle):
                 args = argparse.Namespace(model="qwen2.5:3b", num_ctx=4096, threads=6,
-                                          mode="didatico", with_xtts_cycle=cycle, load_xtts=False)
+                                          mode="didatico", with_xtts_cycle=cycle, load_xtts=False,
+                                          thinking="off", timeout=600)
                 events = mock.Mock()
-                events.memory.side_effect = [6400, 4000, 6300]
+                events.memory.return_value = (6300, 120)
+                events.samples.return_value = nullcontext([(6400, 100), (3900, 124), (4000, 122)])
                 events.request.side_effect = [generation] if cycle else [generation, {}]
                 with mock.patch.multiple(benchmark_llm, _xtts_cycle=events.unload_xtts,
-                                         _available_mib=events.memory):
+                                         _memory_mib=events.memory, _sample_generation=events.samples):
                     report = benchmark_llm._run_scenario("curto", "Material de estudo", args, events)
                 methods = [call[0] for call in events.mock_calls]
                 self.assertEqual(methods, (
-                    ["unload_xtts", "memory", "request", "memory", "wait_for_unload", "memory"] if cycle
-                    else ["memory", "request", "memory", "request", "wait_for_unload", "memory"]
+                    ["unload_xtts", "samples", "request", "wait_for_unload", "memory"] if cycle
+                    else ["samples", "request", "request", "wait_for_unload", "memory"]
                 ))
                 endpoint, payload = events.request.call_args_list[0].args
                 self.assertEqual(endpoint, "/api/generate")
                 self.assertFalse(payload["stream"])
+                self.assertIs(payload["think"], False)
+                self.assertEqual(report["ram_disponivel_mib"]["minimo_amostrado"], 3900)
+                self.assertEqual(report["swap_aumento_amostrado_mib"], 24)
                 self.assertEqual(payload["keep_alive"], 0 if cycle else "30s")
                 self.assertEqual(payload["options"]["num_gpu"], 0)
                 self.assertEqual(payload["options"]["num_predict"], 1200)

@@ -95,7 +95,7 @@ class AppTests(unittest.TestCase):
             ("Resumo de revisão", "resumo", True),
         ):
             with self.subTest(mode=mode), mock.patch.object(llm, "generate_study_script") as generate:
-                def transform(text, mode, progress_callback):
+                def transform(text, mode, model, progress_callback):
                     progress_callback(1, 2)
                     progress_callback(2, 2)
                     return {"script": f"Roteiro {mode}.", "truncated": truncated}
@@ -106,7 +106,7 @@ class AppTests(unittest.TestCase):
                 app.radio(key="script_mode").set_value(label)
                 app.button(key="prepare_script").click().run()
                 self.assertFalse(app.exception)
-                generate.assert_called_once_with(source, mode=mode, progress_callback=mock.ANY)
+                generate.assert_called_once_with(source, mode=mode, model=config.OLLAMA_MODEL, progress_callback=mock.ANY)
                 self.assertEqual(app.text_area(key="script_text").value, f"Roteiro {mode}.")
                 self.assertEqual(app.get("progress")[0].proto.text, "Seção 2 de 2 processada")
                 self.assertTrue(any("Revise o texto" in item.value for item in app.success))
@@ -114,6 +114,27 @@ class AppTests(unittest.TestCase):
                 app.text_area(key="script_text").input("Minha revisão.").run()
                 self.assertEqual(app.text_area(key="script_text").value, "Minha revisão.")
                 self.assertEqual(generate.call_count, 1)
+
+    def test_model_refresh_and_selection_without_listing_on_reruns(self):
+        with mock.patch.object(llm, "list_local_models", return_value=[
+            {"name": "qwen3:14b", "size_bytes": 9_276_000_000}
+        ]) as models, mock.patch.object(llm, "generate_study_script", return_value={
+            "script": "Roteiro preparado.", "truncated": False
+        }) as generate:
+            app = self.app().run()
+            models.assert_not_called()
+            app.button(key="refresh_models").click().run()
+            app.selectbox(key="script_model").select("qwen3:14b").run()
+            self.assertFalse(app.exception)
+            self.assertTrue(any("RAM" in item.value and "CPU" in item.value for item in app.caption))
+            self.assertTrue(any("swap" in item.value for item in app.warning))
+            self.assertTrue(any("Vantagens" in item.value for item in app.markdown))
+            self.assertTrue(any("Desvantagens" in item.value for item in app.markdown))
+            app.text_area(key="script_text").input("Texto de estudo.")
+            app.button(key="prepare_script").click().run()
+            models.assert_called_once_with(start_server=True)
+            generate.assert_called_once_with("Texto de estudo.", mode="didatico",
+                                             model="qwen3:14b", progress_callback=mock.ANY)
 
     def test_ai_rejects_empty_or_oversized_text_before_generation(self):
         with mock.patch.object(config, "MAX_TEXT_CHARS", 10), mock.patch.object(llm, "generate_study_script") as generate:
@@ -144,11 +165,11 @@ class AppTests(unittest.TestCase):
             app = self.app().run()
             self.assertFalse(app.exception)
             self.assertTrue(any("Nenhuma voz cadastrada" in item.value for item in app.info))
-            self.assertEqual(len(app.selectbox), 0)
+            self.assertFalse(any(item.label == "Voz cadastrada" for item in app.selectbox))
         with mock.patch.object(voice, "list_available_voices", return_value=["voz A", "voz B"]):
             app = self.app().run()
             self.assertFalse(app.exception)
-            self.assertEqual(app.selectbox[0].options, ["voz A", "voz B"])
+            self.assertEqual(app.selectbox(key="voice_selection").options, ["voz A", "voz B"])
 
     def test_script_metrics_and_chunk_estimate(self):
         script = "Olá, este é um roteiro de teste.\nAqui está o segundo parágrafo."
@@ -274,7 +295,7 @@ class AppTests(unittest.TestCase):
                     next(item for item in app.text_input if item.label == "Nome da voz").input("Nova voz")
                     next(button for button in app.button if button.label == "Cadastrar voz").click().run()
                     self.assertFalse(app.exception)
-                    self.assertEqual(app.selectbox[0].value, "Nova voz")
+                    self.assertEqual(app.selectbox(key="voice_selection").value, "Nova voz")
                     self.assertTrue(any("cadastrada com sucesso" in item.value for item in app.success))
                     self.assertEqual(list((self.root / "voices").iterdir()), [])
                     self.assertTrue(all(not path.exists() for path in reference_paths))

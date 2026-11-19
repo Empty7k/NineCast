@@ -59,14 +59,15 @@ Todo o processamento — extração e limpeza de PDF, preparação de roteiro co
    - `CPU_THREADS=6` (quantidade de threads físicas usadas pelo PyTorch e pelo Ollama na CPU).
    - `OLLAMA_BASE_URL=http://127.0.0.1:11434` (URL HTTP local em loopback do Ollama).
    - `OLLAMA_MODEL=qwen2.5:3b` (nome do modelo local no Ollama).
-   - `LLM_NUM_CTX=4096` (janela de contexto em tokens do Ollama).
+   - `LLM_NUM_CTX=4096` (janela em tokens. O perfil avançado usa até 2048).
+   - `LLM_TIMEOUT_SECONDS=600` (tempo de espera por seção).
    - `LLM_MAX_SECTION_CHARS=3200` (limite de caracteres por seção enviada ao LLM).
 
 ---
 
 ## 4. Como executar o projeto
 
-*(Se for utilizar a preparação de roteiros com IA local, certifique-se de que o serviço do Ollama está ativo, por exemplo com `OLLAMA_NO_CLOUD=1 ollama serve`.)*
+Para preparar roteiros, instale o Ollama e baixe o modelo desejado. O NineCast reutiliza um servidor ativo. Ao transformar um roteiro ou clicar em **Atualizar modelos locais**, ele inicia o Ollama em loopback sob demanda e encerra o processo que abriu ao terminar.
 
 ### Opção A — Lançador portátil (recomendado)
 Na raiz do repositório, execute:
@@ -101,7 +102,7 @@ Para criar um atalho gráfico local em `~/.local/share/applications/NineCast.des
 2. **Preparar o roteiro (Aba `🎙️ Novo Episódio`):**
    - *(Opcional)* Informe o **Título do episódio**, usado para compor o nome do arquivo MP3 e gravar os metadados ID3.
    - Digite/cole o texto no campo **Texto do episódio**, **ou** importe um arquivo com **📄 Importar texto de PDF**.
-   - *(Opcional)* Abra **✨ Preparar roteiro com IA local**, escolha entre **Roteiro didático (explicação para aula)** ou **Resumo de revisão** e clique em **Transformar roteiro com IA**. O texto gerado substitui o editor para que você revise antes de gerar o áudio (se o Ollama falhar, o material original permanece intacto no editor).
+   - *(Opcional)* Abra **✨ Preparar roteiro com IA local** e clique em **Atualizar modelos locais** para selecionar outro modelo instalado. Escolha entre **Roteiro didático (explicação para aula)** ou **Resumo de revisão** e clique em **Transformar roteiro com IA**. Revise o texto gerado no editor antes de gerar o áudio.
    - Acompanhe em tempo real os cartões de métricas com **Palavras**, **Blocos XTTS** (já considerando a expansão da normalização pré-TTS) e **Duração estimada**.
 
 3. **Gerar e ouvir o episódio:**
@@ -172,7 +173,7 @@ NineCast/
 
 ## 8. Testes e validações
 
-Para executar toda a suíte de testes unitários e de interface (**75 testes**, rápida e sem exigir XTTS ou Ollama rodando):
+Para executar toda a suíte de testes unitários e de interface:
 ```bash
 .venv/bin/python -m unittest discover -s tests -p "test_*.py" -v
 ```
@@ -200,7 +201,13 @@ COQUI_TOS_AGREED=1 .venv/bin/python tests/test_audio_service.py --integration
 ```bash
 .venv/bin/python tests/benchmark_xtts.py --speaker-wav /caminho/para/referencia.wav --agree-license
 .venv/bin/python tests/benchmark_llm.py --with-xttsCycle
+.venv/bin/python tests/benchmark_llm.py --model qwen3:8b --thinking off
+.venv/bin/python tests/benchmark_llm.py --model qwen3:14b --num-ctx 2048 --thinking off
 ```
+
+O benchmark do Ollama amostra a memória disponível e o swap do sistema a cada 250 ms durante cada seção, além de registrar tempo, velocidade e motivo de término.
+
+No Ryzen 5 PRO 5650U, o `qwen2.5:3b` foi a opção mais rápida para os dois textos de estudo (12,7–14,0 tokens/s). O `qwen3:8b` híbrido gerou 5,3–6,3 tokens/s e reescreveu a apostila em frases mais diretas. Ambos omitiram o termo *atomicidade*. A variante `qwen3:4b` testada exigia raciocínio, e o `qwen3:14b` experimental pressionou o swap mesmo com contexto de 2048 tokens. A interface verifica a capacidade de desativar o raciocínio e a RAM disponível para o 14B antes de gerar.
 
 ---
 

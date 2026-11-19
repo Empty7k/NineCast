@@ -5,6 +5,9 @@ import json
 import os
 import shutil
 import sys
+import threading
+import time
+from contextlib import contextmanager
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -36,12 +39,37 @@ _SCENARIOS = {
 }
 
 
-def _available_mib() -> float:
+def _memory_mib() -> tuple[float, float]:
+    fields = {}
     with open("/proc/meminfo", encoding="ascii") as meminfo:
         for line in meminfo:
-            if line.startswith("MemAvailable:"):
-                return round(int(line.split()[1]) / 1024, 1)
-    raise RuntimeError("MemAvailable não está disponível em /proc/meminfo.")
+            key, value = line.split(":", 1)
+            if key in {"MemAvailable", "SwapTotal", "SwapFree"}:
+                fields[key] = int(value.split()[0]) / 1024
+    return fields["MemAvailable"], fields["SwapTotal"] - fields["SwapFree"]
+
+
+def _available_mib() -> float:
+    return _memory_mib()[0]
+
+
+@contextmanager
+def _sample_generation():
+    samples = [_memory_mib()]
+    stop = threading.Event()
+
+    def sample():
+        while not stop.wait(0.25):
+            samples.append(_memory_mib())
+
+    worker = threading.Thread(target=sample)
+    worker.start()
+    try:
+        yield samples
+    finally:
+        stop.set()
+        worker.join()
+        samples.append(_memory_mib())
 
 
 def _xtts_cycle(load_xtts: bool, client: llm.LocalOllama) -> dict:
@@ -67,22 +95,22 @@ def _xtts_cycle(load_xtts: bool, client: llm.LocalOllama) -> dict:
 
 def _run_scenario(name: str, source: str, args: argparse.Namespace, client: llm.LocalOllama) -> dict:
     cycle = _xtts_cycle(args.load_xtts, client) if args.with_xtts_cycle else None
+    think = {"on": True, "off": False}.get(args.thinking)
     payload = llm.generation_payload(llm.remove_citations(source), args.mode, args.model, args.num_ctx, args.threads,
-                                     0 if args.with_xtts_cycle else "30s")
-    before = _available_mib()
-    result = client.request("/api/generate", payload, timeout=300)
+                                     0 if args.with_xtts_cycle else "30s", think=think)
+    started = time.monotonic()
+    with _sample_generation() as samples:
+        result = client.request("/api/generate", payload, timeout=args.timeout)
+    elapsed = time.monotonic() - started
+    before = samples[0][0]
+    after_generation = samples[-1][0]
     model = result.get("model") or args.model
-    try:
-        after_generation = _available_mib()
-    finally:
-        if not args.with_xtts_cycle:
-            client.request("/api/generate", {"model": model, "stream": False, "keep_alive": 0})
+    if not args.with_xtts_cycle:
+        client.request("/api/generate", {"model": model, "stream": False, "keep_alive": 0})
     client.wait_for_unload(model)
-    after_unload = _available_mib()
+    after_unload, after_swap = _memory_mib()
 
-    script = result.get("response")
-    if not result.get("done") or not isinstance(script, str) or not script.strip():
-        raise RuntimeError(f"Ollama devolveu uma geração vazia ou incompleta no cenário {name}.")
+    script = result.get("response") or ""
     eval_duration = result.get("eval_duration")
     eval_count = result.get("eval_count")
     return {
@@ -94,9 +122,16 @@ def _run_scenario(name: str, source: str, args: argparse.Namespace, client: llm.
         "ciclo_xtts": cycle,
         "ram_disponivel_mib": {
             "antes_da_geracao": before,
+            "minimo_amostrado": min(ram for ram, _ in samples),
             "logo_apos_resposta": after_generation,
             "apos_confirmar_liberacao": after_unload,
         },
+        "swap_aumento_amostrado_mib": max(swap for _, swap in samples) - samples[0][1],
+        "swap_apos_liberacao_mib": after_swap,
+        "tempo_total_secao_s": elapsed,
+        "think_enviado": think,
+        "thinking_caracteres": len(result.get("thinking") or ""),
+        "thinking_no_roteiro_bruto": "<think" in script.lower(),
         "keep_alive_da_geracao": payload["keep_alive"],
         "modelo_liberado_api_ps": True,
         "load_duration_ns": result.get("load_duration"),
@@ -106,6 +141,7 @@ def _run_scenario(name: str, source: str, args: argparse.Namespace, client: llm.
         "tokens_por_segundo": round(eval_count * 1e9 / eval_duration, 2)
         if eval_count is not None and eval_duration else None,
         "done_reason": result.get("done_reason"),
+        "resposta_concluida": result.get("done", False),
         "material": source,
         "roteiro": script.strip(),
     }
@@ -115,6 +151,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", default=config.OLLAMA_MODEL)
     parser.add_argument("--num-ctx", type=int, default=config.LLM_NUM_CTX)
+    parser.add_argument("--thinking", choices=("off", "on", "default"), default="off")
+    parser.add_argument("--timeout", type=int, default=config.LLM_TIMEOUT_SECONDS)
     parser.add_argument("--threads", type=int, default=config.CPU_THREADS)
     parser.add_argument("--mode", choices=tuple(llm.MODES), default="didatico")
     parser.add_argument("--with-xttsCycle", dest="with_xtts_cycle", action="store_true",
@@ -122,8 +160,8 @@ def main() -> int:
     parser.add_argument("--load-xtts", action="store_true",
                         help="Carrega o XTTS real antes do ciclo. Requer COQUI_TOS_AGREED=1.")
     args = parser.parse_args()
-    if args.num_ctx < 1024 or args.threads < 1 or not args.model.strip():
-        parser.error("Informe um modelo, --num-ctx >= 1024 e --threads >= 1.")
+    if args.num_ctx < 1024 or args.threads < 1 or args.timeout < 1 or not args.model.strip():
+        parser.error("Informe um modelo, --num-ctx >= 1024, --threads e --timeout positivos.")
     if args.load_xtts and not args.with_xtts_cycle:
         parser.error("--load-xtts requer --with-xttsCycle.")
     if args.load_xtts and os.getenv("COQUI_TOS_AGREED") != "1":
@@ -131,10 +169,11 @@ def main() -> int:
 
     try:
         client = llm.LocalOllama(config.OLLAMA_BASE_URL)
-        client.require_local_model(args.model)
-        for name, source in _SCENARIOS.items():
-            print(f"Executando cenário: {name}", file=sys.stderr, flush=True)
-            print(json.dumps(_run_scenario(name, source, args, client), ensure_ascii=False, indent=2), flush=True)
+        with client.serving():
+            client.require_local_model(args.model)
+            for name, source in _SCENARIOS.items():
+                print(f"Executando cenário: {name}", file=sys.stderr, flush=True)
+                print(json.dumps(_run_scenario(name, source, args, client), ensure_ascii=False, indent=2), flush=True)
     except (OSError, ValueError, KeyError, TypeError, RuntimeError) as exc:
         print(f"Benchmark interrompido: {exc}", file=sys.stderr)
         if shutil.which("ollama") is None:
