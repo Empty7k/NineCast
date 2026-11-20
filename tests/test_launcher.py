@@ -9,6 +9,29 @@ from pathlib import Path
 
 
 class LauncherTests(unittest.TestCase):
+    def test_qwen_installer_uses_separate_python_and_cpu_wheels(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            project = Path(temporary) / "Projeto NineCast"
+            project.mkdir()
+            launcher = project / "ninecast.sh"
+            shutil.copy2(Path(__file__).resolve().parent.parent / "ninecast.sh", launcher)
+            uv = project / "uv"
+            log = project / "uv.calls"
+            uv.write_text('#!/bin/bash\nprintf "%s\\n" "$@" >> "$UV_CALLS"\n')
+            uv.chmod(0o755)
+            env = dict(os.environ, PATH=f"{project}:{os.environ['PATH']}", UV_CALLS=str(log))
+            result = subprocess.run([str(launcher), "--install-qwen-tts"], env=env,
+                                    capture_output=True, text=True, check=True)
+            args = log.read_text().splitlines()
+            venv = project / ".venv-qwen-tts"
+            self.assertEqual(args[:4], ["venv", "--python", "3.12", str(venv)])
+            self.assertEqual(args.count(str(venv / "bin/python")), 2)
+            self.assertIn("https://download.pytorch.org/whl/cpu", args)
+            for package in ("torch==2.8.0+cpu", "torchaudio==2.8.0+cpu", "qwen-tts==0.1.1",
+                            "soundfile", "numpy", "faster-whisper==1.2.1"):
+                self.assertIn(package, args)
+            self.assertIn(str(venv), result.stdout)
+
     def test_install_desktop_for_project_with_spaces(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

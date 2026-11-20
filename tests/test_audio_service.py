@@ -262,6 +262,47 @@ class AudioPipelineTests(unittest.TestCase):
         self.assertEqual(list(self.root.glob(".ninecast_audio_*")), [])
 
     @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg/ffprobe indisponível")
+    def test_qwen_batched_pipeline_normalizes_and_exports_id3(self):
+        text = "Reserve 15% da memória para o cache.\nConfira as métricas durante o uso."
+        output = self.root / "qwen.mp3"
+        updates = []
+
+        def batch(chunks, voice_name, paths, callback):
+            self.assertEqual(voice_name, "Voz Qwen")
+            self.assertEqual(" ".join(chunks), "Reserve quinze por cento da memória para o cache. "
+                                              "Confira as métricas durante o uso.")
+            self.assertTrue(all(len(chunk) <= 35 for chunk in chunks))
+            results = []
+            for index, (chunk, path) in enumerate(zip(chunks, paths), 1):
+                results.append(fake_synthesis(chunk, voice_name, path))
+                callback(index, len(chunks))
+            return results
+
+        with mock.patch.object(config, "QWEN_TTS_MAX_CHARS", 35), \
+             mock.patch.object(audio.qwen_tts, "synthesize_chunks", side_effect=batch) as synthesize, \
+             mock.patch.object(voice, "synthesize_speech") as xtts:
+            result = audio.generate_podcast(
+                text, "Voz Qwen", output, lambda n, total: updates.append((n, total)),
+                episode_title="Memória", engine="qwen3_06b",
+            )
+        synthesize.assert_called_once()
+        xtts.assert_not_called()
+        self.assertEqual(updates, [(1, 3), (2, 3), (3, 3)])
+        self.assertEqual(result["chunk_count"], 3)
+        probe = subprocess.run(["ffprobe", "-v", "error", "-show_entries",
+                                "stream=bit_rate,sample_rate:format_tags=title,artist", "-of", "json",
+                                str(output)], capture_output=True, text=True, check=True)
+        tags = json.loads(probe.stdout)
+        self.assertEqual(tags["format"]["tags"], {"title": "Memória", "artist": "Voz Qwen"})
+        self.assertEqual(tags["streams"][0], {"sample_rate": "48000", "bit_rate": "192000"})
+
+    def test_unknown_engine_rejected_before_synthesis(self):
+        with mock.patch.object(audio.qwen_tts, "synthesize_chunks") as synthesize:
+            with self.assertRaisesRegex(ValueError, "motor de voz"):
+                audio.generate_podcast("Roteiro.", "Voz", engine="desconhecido")
+            synthesize.assert_not_called()
+
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg/ffprobe indisponível")
     def test_title_creates_unique_sanitized_name_and_id3_metadata(self):
         existing = self.root / "algebra-cafe-aaaaaaaaaa.mp3"
         existing.write_bytes(b"nao sobrescrever")

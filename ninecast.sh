@@ -1,6 +1,25 @@
 #!/usr/bin/env bash
 set -euo pipefail
 PROJECT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+if [[ "${1:-}" == "--install-qwen-tts" ]]; then
+    if [[ "$#" -ne 1 ]]; then
+        printf 'Uso: %s --install-qwen-tts\n' "$0" >&2
+        exit 2
+    fi
+    if ! command -v uv >/dev/null; then
+        printf 'uv não encontrado no PATH. Instale o uv para preparar o Qwen3-TTS.\n' >&2
+        exit 1
+    fi
+    QWEN_ENV="$PROJECT_DIR/.venv-qwen-tts"
+    if [[ ! -x "$QWEN_ENV/bin/python" ]]; then
+        uv venv --python 3.12 "$QWEN_ENV"
+    fi
+    uv pip install --python "$QWEN_ENV/bin/python" --index https://download.pytorch.org/whl/cpu \
+        'torch==2.8.0+cpu' 'torchaudio==2.8.0+cpu'
+    uv pip install --python "$QWEN_ENV/bin/python" 'qwen-tts==0.1.1' soundfile numpy 'faster-whisper==1.2.1'
+    printf 'Ambiente do Qwen3-TTS instalado em %s\n' "$QWEN_ENV"
+    exit 0
+fi
 if [[ "${1:-}" == "--install-desktop" ]]; then
     if [[ "$#" -ne 1 ]]; then
         printf 'Uso: %s --install-desktop\n' "$0" >&2

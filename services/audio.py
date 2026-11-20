@@ -14,9 +14,45 @@ from typing import Callable
 
 import config
 import numpy as np
-from services import tts_text, voice
+from services import qwen_tts, tts_text, voice
 
 normalize_text_for_tts = tts_text.normalize_text_for_tts
+
+TTS_ENGINES = {
+    "xtts": {
+        "label": "XTTS-v2",
+        "perfil": "Clonagem rápida com uma ou mais referências",
+        "velocidade_cpu": "RTF de 2,97× no benchmark",
+        "ram_estimada": "RAM disponível caiu de 5,90 para 2,18 GiB no benchmark",
+        "licenca": "CPML (uso não comercial)",
+        "requires_cpml": True,
+        "requires_transcript": False,
+        "vantagens": "Aceita de 1 a 5 WAVs sem transcrição e leu bem as siglas do teste.",
+        "desvantagens": "Timbre mais robótico na audição comparativa e cosseno de 0,617 no grupo independente.",
+        "recomendado_para": "Episódios longos ou referências sem transcrição.",
+    },
+    "qwen3_06b": {
+        "label": "Qwen3-TTS 0.6B",
+        "perfil": "Clonagem em FP32 com transcrição automática local (ICL)",
+        "velocidade_cpu": "RTF de 6,81× no benchmark",
+        "ram_estimada": "RAM disponível caiu de 8,65 para 4,29 GiB no benchmark",
+        "licenca": "Apache-2.0",
+        "requires_cpml": False,
+        "requires_transcript": True,
+        "vantagens": "Voz mais natural na audição comparativa, cosseno de 0,707 no grupo independente "
+                     "e memória do modelo liberada ao sair do processo.",
+        "desvantagens": "Síntese mais lenta em CPU, maior uso de swap em FP32 e instalação isolada obrigatória.",
+        "recomendado_para": "Episódios que priorizam fidelidade. A transcrição automática pode ser revisada.",
+    },
+}
+
+
+def describe_tts_engine(engine_id: str) -> dict:
+    try:
+        return TTS_ENGINES[engine_id].copy()
+    except (KeyError, TypeError) as exc:
+        raise ValueError("Selecione um motor de voz conhecido.") from exc
+
 
 _FILTERS = (
     "highpass=f=80,"
@@ -205,6 +241,7 @@ def generate_podcast(
     output_path: Path | None = None,
     progress_callback: Callable[[int, int], None] | None = None,
     episode_title: str | None = None,
+    engine: str = "xtts",
 ) -> dict:
     """Sintetiza blocos e salva um MP3; nunca sobrescreve uma saída existente.
 
@@ -218,8 +255,10 @@ def generate_podcast(
     if episode_title is not None and not isinstance(episode_title, str):
         raise TypeError("episode_title deve ser texto ou None.")
     clean_title = episode_title.strip() if episode_title else ""
+    describe_tts_engine(engine)
     normalized_text = tts_text.normalize_text_for_tts(text)
-    chunks = _chunks_with_paragraphs(normalized_text, config.XTTS_MAX_CHARS)
+    max_chars = config.QWEN_TTS_MAX_CHARS if engine == "qwen3_06b" else config.XTTS_MAX_CHARS
+    chunks = _chunks_with_paragraphs(normalized_text, max_chars)
     if progress_callback is not None and not callable(progress_callback):
         raise TypeError("progress_callback deve ser uma função ou None.")
     ffmpeg = shutil.which("ffmpeg")
@@ -242,23 +281,26 @@ def generate_podcast(
         raise FileExistsError(f"O arquivo de saída já existe: {output_path}")
 
     started = time.perf_counter()
-    synthesis_seconds = 0.0
     with tempfile.TemporaryDirectory(prefix=".ninecast_audio_", dir=output_path.parent) as temporary:
         temp_dir = Path(temporary)
-        wavs = []
-        for index, (chunk, _) in enumerate(chunks):
-            wav_path = temp_dir / f"trecho_{index:04d}.wav"
-            metrics = voice.synthesize_speech(chunk, voice_name, wav_path)
-            synthesis_seconds += metrics["synthesis_seconds"]
-            wavs.append(wav_path)
-            if progress_callback is not None:
-                progress_callback(index + 1, len(chunks))
+        wavs = [temp_dir / f"trecho_{index:04d}.wav" for index in range(len(chunks))]
+        if engine == "qwen3_06b":
+            results = qwen_tts.synthesize_chunks(
+                [chunk for chunk, _ in chunks], voice_name, wavs, progress_callback,
+            )
+        else:
+            results = []
+            for index, ((chunk, _), wav_path) in enumerate(zip(chunks, wavs), 1):
+                results.append(voice.synthesize_speech(chunk, voice_name, wav_path))
+                if progress_callback is not None:
+                    progress_callback(index, len(chunks))
+        synthesis_seconds = sum(result["synthesis_seconds"] for result in results)
         combined = temp_dir / "montagem.wav"
         duration = _concatenate_wavs(wavs, [paragraph for _, paragraph in chunks], combined)
         encoded = temp_dir / "episodio.mp3"
         metadata_title = clean_title or output_path.stem
         # MPEG-2 a 24 kHz limita MP3 a 160 kbps; 48 kHz permite 192 kbps reais.
-        # Os WAVs do XTTS e a montagem continuam em 24 kHz.
+        # Os WAVs dos motores e a montagem continuam em 24 kHz.
         command = [ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-n", "-i", str(combined),
                    "-af", _FILTERS, "-ac", "1", "-ar", "48000", "-c:a", "libmp3lame", "-b:a", "192k",
                    "-metadata", f"title={metadata_title}", "-metadata", f"artist={voice_name}", str(encoded)]

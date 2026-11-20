@@ -12,7 +12,7 @@ sys.path.insert(0, str(ROOT))
 from streamlit.testing.v1 import AppTest
 
 import config
-from services import audio, library, llm, voice
+from services import audio, library, llm, qwen_tts, voice
 
 
 class AppTests(unittest.TestCase):
@@ -194,9 +194,10 @@ class AppTests(unittest.TestCase):
         podcast.write_bytes(b"ID3 amostra de MP3 para testar a interface")
         result = {"output_path": str(podcast), "audio_duration": 7.5, "total_seconds": 20.0, "rtf": 2.5}
 
-        def generate(text, voice_name, progress_callback, episode_title=None):
+        def generate(text, voice_name, progress_callback, episode_title=None, engine="xtts"):
             self.assertEqual(voice_name, "voz")
             self.assertEqual(episode_title, "Aula de testes")
+            self.assertEqual(engine, "xtts")
             progress_callback(1, 1)
             return result
 
@@ -310,6 +311,109 @@ class AppTests(unittest.TestCase):
             next(button for button in app.button if button.label == "Cadastrar voz").click().run()
             self.assertTrue(any("no máximo 5" in item.value for item in app.error))
             create.assert_not_called()
+
+    def test_qwen_selection_uses_separate_voices_and_no_cpml(self):
+        output = self.root / "qwen.mp3"
+        output.write_bytes(b"ID3 amostra")
+        result = {"output_path": str(output), "audio_duration": 5, "total_seconds": 30, "rtf": 6}
+        with mock.patch.object(voice, "list_available_voices", return_value=["XTTS"]), \
+             mock.patch.object(qwen_tts, "is_available", return_value=True), \
+             mock.patch.object(qwen_tts, "list_available_voices", return_value=["Qwen"]), \
+             mock.patch.object(audio, "generate_podcast", return_value=result) as generate:
+            app = self.app().run()
+            self.assertEqual(app.selectbox(key="voice_selection").value, "XTTS")
+            app.selectbox(key="tts_engine").select("qwen3_06b").run()
+            self.assertFalse(app.exception)
+            self.assertEqual(app.selectbox(key="qwen_voice_selection").options, ["Qwen"])
+            self.assertFalse(any(c.label.startswith("Li e aceito") for c in app.checkbox))
+            self.assertTrue(any("Apache-2.0" in c.value for c in app.caption))
+            self.assertTrue(any("6,81×" in c.value for c in app.caption))
+            app.text_area(key="script_text").input("Texto para o episódio.")
+            next(b for b in app.button if b.label == "🎙️ Gerar Podcast").click().run()
+            self.assertFalse(app.exception)
+            self.assertEqual(generate.call_args.args[1], "Qwen")
+            self.assertEqual(generate.call_args.kwargs["engine"], "qwen3_06b")
+            self.assertEqual(len(app.get("audio")), 1)
+
+    def test_unavailable_qwen_shows_install_command(self):
+        with mock.patch.object(config, "TTS_ENGINE", "qwen3_06b"), \
+             mock.patch.object(qwen_tts, "is_available", return_value=False), \
+             mock.patch.object(qwen_tts, "list_available_voices", return_value=["Qwen"]), \
+             mock.patch.object(audio, "generate_podcast") as generate:
+            app = self.app().run()
+            self.assertEqual(app.selectbox(key="tts_engine").value, "qwen3_06b")
+            self.assertTrue(any("--install-qwen-tts" in w.value for w in app.warning))
+            app.text_area(key="script_text").input("Texto para o episódio.")
+            next(b for b in app.button if b.label == "🎙️ Gerar Podcast").click().run()
+            self.assertTrue(any("Instale o Qwen3-TTS" in e.value for e in app.error))
+            generate.assert_not_called()
+
+    def test_qwen_registration_transcribes_empty_field_and_removes_upload(self):
+        sample = mock.Mock()
+        sample.getvalue.return_value = b"audio"
+        paths, names = [], []
+
+        def upload(label, **kwargs):
+            if label == "Documento PDF":
+                return None
+            self.assertEqual(kwargs["type"], ["wav"])
+            self.assertFalse(kwargs.get("accept_multiple_files"))
+            return sample
+
+        def register(name, path, transcript):
+            self.assertEqual(path.read_bytes(), b"audio")
+            self.assertEqual(transcript, "")
+            paths.append(path)
+            names.append(name)
+            return "Áudio transcrito no cadastro."
+
+        with mock.patch.object(config, "TTS_ENGINE", "qwen3_06b"), \
+             mock.patch.object(config, "VOICES_DIR", self.root / "voices"), \
+             mock.patch.object(qwen_tts, "is_available", return_value=True), \
+             mock.patch.object(qwen_tts, "list_available_voices", side_effect=lambda: names.copy()), \
+             mock.patch.object(qwen_tts, "register_voice", side_effect=register), \
+             mock.patch("streamlit.file_uploader", side_effect=upload):
+            app = self.app().run()
+            next(w for w in app.text_input if w.label == "Nome da voz").input("Nova voz Qwen")
+            next(b for b in app.button if b.label == "Cadastrar voz").click().run()
+            self.assertFalse(app.exception)
+            self.assertFalse(app.error)
+            self.assertEqual(app.selectbox(key="qwen_voice_selection").value, "Nova voz Qwen")
+            self.assertTrue(any("Áudio transcrito no cadastro." == t.value for t in app.text))
+            self.assertEqual(len(paths), 1)
+            self.assertFalse(paths[0].exists())
+
+    def test_qwen_transcribe_button_fills_editor_and_saves_user_revision(self):
+        sample = mock.Mock()
+        sample.getvalue.return_value = b"audio"
+        paths = []
+
+        def transcribe(path):
+            self.assertEqual(path.read_bytes(), b"audio")
+            paths.append(path)
+            return "Transcrição automática."
+
+        with mock.patch.object(config, "TTS_ENGINE", "qwen3_06b"), \
+             mock.patch.object(config, "VOICES_DIR", self.root / "voices"), \
+             mock.patch.object(qwen_tts, "is_available", return_value=True), \
+             mock.patch.object(qwen_tts, "list_available_voices", return_value=[]), \
+             mock.patch.object(qwen_tts, "transcribe_reference", side_effect=transcribe) as auto, \
+             mock.patch.object(qwen_tts, "register_voice", return_value="Transcrição revisada.") as register, \
+             mock.patch("streamlit.file_uploader", side_effect=lambda label, **kwargs:
+                        None if label == "Documento PDF" else sample):
+            app = self.app().run()
+            next(b for b in app.button if b.label == "✨ Transcrever automaticamente").click().run()
+            self.assertFalse(app.exception)
+            self.assertFalse(app.error)
+            auto.assert_called_once()
+            register.assert_not_called()
+            self.assertFalse(paths[0].exists())
+            self.assertEqual(app.text_area(key="qwen_reference_transcript").value, "Transcrição automática.")
+            app.text_area(key="qwen_reference_transcript").input("Transcrição revisada.")
+            next(w for w in app.text_input if w.label == "Nome da voz").input("Nova voz Qwen")
+            next(b for b in app.button if b.label == "Cadastrar voz").click().run()
+            self.assertFalse(app.exception)
+            self.assertEqual(register.call_args.args[2], "Transcrição revisada.")
 
 
 if __name__ == "__main__":

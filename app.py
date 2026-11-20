@@ -7,7 +7,7 @@ from pathlib import Path
 import streamlit as st
 
 import config
-from services import audio, content, library, llm, voice
+from services import audio, content, library, llm, qwen_tts, voice
 
 
 def prepare_script_with_ai() -> None:
@@ -74,51 +74,104 @@ st.write("Transforme seus conteúdos de estudo em podcasts personalizados.")
 
 with st.sidebar:
     st.header("Voz do episódio")
+    default_engine = config.TTS_ENGINE if config.TTS_ENGINE in audio.TTS_ENGINES else "xtts"
+    selected_engine = st.selectbox(
+        "Motor de voz (TTS)", list(audio.TTS_ENGINES),
+        index=list(audio.TTS_ENGINES).index(default_engine),
+        format_func=lambda engine: audio.TTS_ENGINES[engine]["label"],
+        key="tts_engine",
+    )
+    engine_description = audio.describe_tts_engine(selected_engine)
+    st.caption(engine_description["perfil"])
+    st.caption(f"CPU · {engine_description['velocidade_cpu']} · {engine_description['ram_estimada']}")
+    st.caption(f"Licença · {engine_description['licenca']}")
+    st.write(f"**Vantagens** · {engine_description['vantagens']}")
+    st.write(f"**Desvantagens** · {engine_description['desvantagens']}")
+    st.caption(engine_description["recomendado_para"])
     st.caption("Use apenas gravações de voz que você tenha autorização para utilizar.")
+    uses_qwen = selected_engine == "qwen3_06b"
+    engine_available = not uses_qwen or qwen_tts.is_available()
+    if not engine_available:
+        st.warning("Qwen3-TTS indisponível. Execute `./ninecast.sh --install-qwen-tts` no terminal.")
+    voice_service = qwen_tts if uses_qwen else voice
+    selection_key = "qwen_voice_selection" if uses_qwen else "voice_selection"
     if message := st.session_state.pop("voice_success", None):
         st.success(message)
-    voices = voice.list_available_voices()
+        if transcript := st.session_state.pop("voice_transcript", None):
+            st.caption("Transcrição automática salva para conferência")
+            st.text(transcript)
+    try:
+        voices = voice_service.list_available_voices()
+    except (ValueError, OSError) as exc:
+        voices = []
+        st.error(f"Não foi possível listar as vozes: {exc}")
     pending_voice = st.session_state.pop("pending_voice", None)
     if pending_voice in voices:
-        st.session_state["voice_selection"] = pending_voice
+        st.session_state[selection_key] = pending_voice
     if voices:
-        if st.session_state.get("voice_selection") not in voices:
-            st.session_state["voice_selection"] = voices[0]
-        selected_voice = st.selectbox("Voz cadastrada", voices, key="voice_selection")
+        if st.session_state.get(selection_key) not in voices:
+            st.session_state[selection_key] = voices[0]
+        selected_voice = st.selectbox("Voz cadastrada", voices, key=selection_key)
     else:
         selected_voice = None
         st.info("Nenhuma voz cadastrada. Adicione sua primeira voz autorizada acima.")
 
     with st.expander("➕ Adicionar nova voz autorizada"):
         new_voice_name = st.text_input("Nome da voz")
-        uploaded = st.file_uploader(
-            "Arquivos de referência (.wav)",
-            type=["wav"],
-            accept_multiple_files=True,
-            help="Selecione entre 1 e 5 amostras da mesma voz.",
-        )
+        if engine_description["requires_transcript"]:
+            sample = st.file_uploader("Arquivo de referência (.wav)", type=["wav"])
+            uploaded = [sample] if sample else []
+            if st.button("✨ Transcrever automaticamente", disabled=not engine_available):
+                if sample is None:
+                    st.error("Envie um arquivo WAV para transcrever.")
+                else:
+                    try:
+                        with st.spinner("Transcrevendo a referência neste computador..."):
+                            with tempfile.TemporaryDirectory(prefix="ninecast_upload_") as directory:
+                                reference = Path(directory) / "referencia.wav"
+                                reference.write_bytes(sample.getvalue())
+                                st.session_state["qwen_reference_transcript"] = qwen_tts.transcribe_reference(reference)
+                        st.success("Transcrição preenchida. Você pode revisá-la antes de cadastrar.")
+                    except MemoryError:
+                        st.error("Memória insuficiente. Feche programas pesados e tente novamente.")
+                    except (ValueError, OSError, RuntimeError) as exc:
+                        st.error(f"Não foi possível transcrever a referência. {exc}")
+            ref_text = st.text_area(
+                "Transcrição da referência (opcional)", key="qwen_reference_transcript",
+                placeholder="Deixe em branco para transcrever automaticamente ao cadastrar, ou revise/edite o texto.",
+                help="A fidelidade da clonagem ICL depende da precisão da transcrição.",
+            )
+        else:
+            uploaded = st.file_uploader(
+                "Arquivos de referência (.wav)", type=["wav"], accept_multiple_files=True,
+                help="Selecione entre 1 e 5 amostras da mesma voz.",
+            )
         register_voice = st.button("Cadastrar voz")
 
-    license_accepted = st.checkbox(
-        "Li e aceito a licença não comercial do XTTS-v2",
-        help="No primeiro uso, os pesos do modelo podem ser baixados. As referências permanecem locais.",
-    )
-    st.markdown("[Consultar licença do modelo](https://huggingface.co/coqui/XTTS-v2/blob/main/LICENSE.txt)")
+    license_accepted = True
+    if engine_description["requires_cpml"]:
+        license_accepted = st.checkbox(
+            "Li e aceito a licença não comercial do XTTS-v2",
+            help="No primeiro uso, os pesos do modelo podem ser baixados. As referências permanecem locais.",
+        )
+        st.markdown("[Consultar licença do modelo](https://huggingface.co/coqui/XTTS-v2/blob/main/LICENSE.txt)")
 
     if register_voice:
-        if not new_voice_name.strip() or not uploaded:
+        if not engine_available:
+            st.error("Instale o Qwen3-TTS antes de cadastrar uma voz.")
+        elif uses_qwen and (not new_voice_name.strip() or not uploaded):
+            st.error("Informe o nome da voz e envie um arquivo WAV.")
+        elif not new_voice_name.strip() or not uploaded:
             st.error("Informe o nome da voz e selecione de 1 a 5 arquivos WAV.")
         elif len(uploaded) > 5:
             st.error("Selecione no máximo 5 arquivos WAV para uma voz.")
         elif not license_accepted:
             st.error("Leia e aceite a licença do XTTS-v2 antes de cadastrar a voz.")
-        elif new_voice_name in voice.list_available_voices():
+        elif new_voice_name in voices:
             st.error("Já existe uma voz com esse nome. Escolha outro nome.")
         else:
             try:
-                # O upload é temporário: somente os latentes permanecem no perfil.
                 config.VOICES_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
-                os.environ["COQUI_TOS_AGREED"] = "1"
                 with st.spinner("Preparando a voz. O primeiro carregamento pode demorar..."):
                     with tempfile.TemporaryDirectory(prefix="ninecast_upload_", dir=config.VOICES_DIR) as directory:
                         references = []
@@ -126,7 +179,13 @@ with st.sidebar:
                             reference = Path(directory) / f"referencia_{index:02d}.wav"
                             reference.write_bytes(sample.getvalue())
                             references.append(reference)
-                        voice.get_or_create_voice_latents(new_voice_name, references)
+                        if uses_qwen:
+                            transcript = qwen_tts.register_voice(new_voice_name, references[0], ref_text)
+                            if not ref_text.strip():
+                                st.session_state["voice_transcript"] = transcript
+                        else:
+                            os.environ["COQUI_TOS_AGREED"] = "1"
+                            voice.get_or_create_voice_latents(new_voice_name, references)
                 st.session_state["pending_voice"] = new_voice_name
                 st.session_state["voice_success"] = f"Voz '{new_voice_name}' cadastrada com sucesso."
                 st.rerun()
@@ -163,11 +222,12 @@ with tab_novo:
         if script.strip():
             normalized_script = audio.normalize_text_for_tts(script)
             words = len(script.split())
-            chunks = audio.split_text_into_chunks(normalized_script) if normalized_script.strip() else []
+            max_chars = config.QWEN_TTS_MAX_CHARS if uses_qwen else config.XTTS_MAX_CHARS
+            chunks = audio.split_text_into_chunks(normalized_script, max_chars) if normalized_script.strip() else []
             estimated_minutes = words / 150
             columns = st.columns(3)
             columns[0].metric("Palavras", words)
-            columns[1].metric("Blocos XTTS", len(chunks))
+            columns[1].metric("Blocos Qwen" if uses_qwen else "Blocos XTTS", len(chunks))
             columns[2].metric("Duração estimada", f"~{estimated_minutes:.1f} min")
             if len(script) > config.MAX_TEXT_CHARS:
                 st.warning(
@@ -183,6 +243,8 @@ with tab_novo:
                 f"O roteiro excede o limite de {config.MAX_TEXT_CHARS} caracteres. "
                 "Reduza o texto antes de iniciar a síntese."
             )
+        elif not engine_available:
+            st.error("Instale o Qwen3-TTS antes de gerar o podcast.")
         elif not selected_voice:
             st.error("Cadastre e selecione uma voz antes de gerar o podcast.")
         elif not license_accepted:
@@ -191,7 +253,8 @@ with tab_novo:
             with st.status("Preparando a narração...", expanded=True) as status:
                 progress = st.progress(0, text="Preparando a geração...")
                 try:
-                  os.environ["COQUI_TOS_AGREED"] = "1"
+                  if engine_description["requires_cpml"]:
+                      os.environ["COQUI_TOS_AGREED"] = "1"
 
                   def update_progress(current: int, total: int) -> None:
                       progress.progress(current / total, text=f"Trecho {current} de {total} sintetizado.")
@@ -203,6 +266,7 @@ with tab_novo:
                       selected_voice,
                       progress_callback=update_progress,
                       episode_title=episode_title,
+                      engine=selected_engine,
                   )
                   st.session_state["last_episode"] = result
                   status.update(label="Podcast gerado com sucesso!", state="complete", expanded=False)
