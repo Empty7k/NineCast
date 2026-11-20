@@ -19,10 +19,16 @@ TTS_MODEL = "tts_models/multilingual/multi-dataset/xtts_v2"
 DEFAULT_LANGUAGE = os.getenv("DEFAULT_LANGUAGE", "pt")
 MAX_TEXT_CHARS = int(os.getenv("MAX_TEXT_CHARS", "50000"))
 XTTS_MAX_CHARS = int(os.getenv("XTTS_MAX_CHARS", "220"))
+TTS_ENGINE = os.getenv("TTS_ENGINE", "xtts")
+QWEN_TTS_VENV_DIR = Path(os.getenv("QWEN_TTS_VENV_DIR", str(BASE_DIR / ".venv-qwen-tts")))
+QWEN_TTS_MODEL = os.getenv("QWEN_TTS_MODEL", "Qwen/Qwen3-TTS-12Hz-0.6B-Base")
+QWEN_TTS_MAX_CHARS = int(os.getenv("QWEN_TTS_MAX_CHARS", "220"))
+WHISPER_MODEL = os.getenv("WHISPER_MODEL", "small")
 CPU_THREADS = int(os.getenv("CPU_THREADS", "6"))
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:3b")
 LLM_NUM_CTX = int(os.getenv("LLM_NUM_CTX", "4096"))
+LLM_TIMEOUT_SECONDS = int(os.getenv("LLM_TIMEOUT_SECONDS", "600"))
 LLM_MAX_SECTION_CHARS = int(os.getenv("LLM_MAX_SECTION_CHARS", "3200"))
 
 

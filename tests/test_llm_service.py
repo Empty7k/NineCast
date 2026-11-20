@@ -1,7 +1,9 @@
 """Orquestração local do Ollama sem servidor, pesos ou síntese real."""
 
+import io
 import unittest
 from unittest.mock import Mock, call, patch
+from contextlib import nullcontext
 from urllib.error import HTTPError, URLError
 
 import config
@@ -16,6 +18,8 @@ class StudyScriptTests(unittest.TestCase):
     def setUp(self):
         self.events = Mock()
         self.client = self.events.client
+        self.client.serving.return_value = nullcontext()
+        self.client.require_local_model.return_value = {}
         self.client_type = self.enterContext(patch.object(llm, "LocalOllama", return_value=self.client))
         self.enterContext(patch.object(voice, "unload_model", self.events.unload_xtts))
         self.enterContext(patch.object(config, "OLLAMA_MODEL", "modelo:teste"))
@@ -34,7 +38,7 @@ class StudyScriptTests(unittest.TestCase):
         self.client.request.return_value = response("  Um roteiro.  ")
         result = llm.generate_study_script("Material.", "resumo", "outro", self.events.progress)
         self.assertEqual([event[0] for event in self.events.mock_calls], [
-            "unload_xtts", "client.require_local_model", "client.request",
+            "unload_xtts", "client.serving", "client.require_local_model", "client.request",
             "progress", "client.wait_for_unload",
         ])
         self.assertEqual(result["script"], "Um roteiro.")
@@ -48,6 +52,36 @@ class StudyScriptTests(unittest.TestCase):
         self.assertFalse(payload["stream"])
         self.assertIn(llm.MODES["resumo"], payload["system"])
         self.assertIn("Não realize cálculos", payload["system"])
+
+    def test_disables_thinking_and_strips_reasoning_from_the_script(self):
+        self.client.require_local_model.return_value = {"capabilities": ["thinking"]}
+        self.client.request.return_value = response("Começo. <THINK>oculto</think> Final.<think>cauda")
+        with patch.object(config, "LLM_TIMEOUT_SECONDS", 700):
+            result = llm.generate_study_script("Material.", model="qwen3:4b")
+        self.assertIs(self.client.request.call_args.args[1]["think"], False)
+        self.assertEqual(self.client.request.call_args.kwargs["timeout"], 700)
+        self.assertEqual(result["script"], "Começo.  Final.")
+
+    def test_rejects_thinking_only_variant_before_sending_material(self):
+        self.client.require_local_model.return_value = {"thinking": {"values": [True]}}
+        with self.assertRaisesRegex(ValueError, "exige raciocínio"):
+            llm.generate_study_script("Texto de estudo.", model="qwen3:4b")
+        self.client.request.assert_not_called()
+
+    def test_caps_context_for_advanced_model_with_native_thinking_control(self):
+        self.client.require_local_model.return_value = {"thinking": {"values": [False, True]}}
+        self.client.request.return_value = response("Um roteiro.")
+        with patch.object(llm, "_available_memory_bytes", return_value=12 * 2**30):
+            llm.generate_study_script("Texto de estudo.", model="qwen3:14b")
+        payload = self.client.request.call_args.args[1]
+        self.assertIs(payload["think"], False)
+        self.assertEqual(payload["options"]["num_ctx"], 2048)
+
+    def test_advanced_model_checks_available_ram_before_generation(self):
+        with patch.object(llm, "_available_memory_bytes", return_value=8 * 2**30), \
+             self.assertRaisesRegex(RuntimeError, "RAM disponível"):
+            llm.generate_study_script("Texto de estudo.", model="qwen3:14b")
+        self.client.request.assert_not_called()
 
     def test_sections_preserve_boundaries_and_report_any_length_cutoff(self):
         source = "Um parágrafo.\n\nFrase dois. Frase três."
@@ -101,10 +135,10 @@ class LocalOllamaTests(unittest.TestCase):
             unload.assert_not_called()
 
     def test_remote_alias_is_rejected_before_sending_text(self):
-        with patch.object(llm.LocalOllama, "request", return_value={"remote_host": "remoto"}) as request, \
+        with patch.object(llm.LocalOllama, "request", side_effect=[{"models": []}, {"remote_host": "remoto"}]) as request, \
                 patch.object(voice, "unload_model"), self.assertRaisesRegex(ValueError, "locais"):
             llm.generate_study_script("Material privado.", model="apelido")
-        request.assert_called_once_with("/api/show", {"model": "apelido"})
+        self.assertEqual(request.call_args_list, [call("/api/ps", timeout=2), call("/api/show", {"model": "apelido"})])
 
     def test_actionable_api_errors(self):
         client = llm.LocalOllama("http://localhost:11434")
@@ -112,9 +146,85 @@ class LocalOllamaTests(unittest.TestCase):
             (URLError(ConnectionRefusedError()), "ollama serve"),
             (URLError(TimeoutError()), "tempo de espera"),
             (TimeoutError(), "tempo de espera"),
-            (HTTPError(client.base_url, 404, "Not Found", {}, None), "ollama pull meu-modelo"),
-            (HTTPError(client.base_url, 307, "Redirect", {}, None), "HTTP 307"),
+            (HTTPError(client.base_url, 404, "Not Found", {}, io.BytesIO()), "ollama pull meu-modelo"),
+            (HTTPError(client.base_url, 307, "Redirect", {}, io.BytesIO()), "HTTP 307"),
         ):
             with self.subTest(error=error), patch.object(client._http, "open", side_effect=error), \
                     self.assertRaisesRegex(RuntimeError, message):
                 client.require_local_model("meu-modelo")
+
+    def test_reuses_running_server(self):
+        client = llm.LocalOllama("http://localhost:11434")
+        with patch.object(client, "request", return_value={"models": []}) as request, \
+             patch.object(llm.subprocess, "Popen") as start, client.serving():
+            request.assert_called_once_with("/api/ps", timeout=2)
+            start.assert_not_called()
+
+    def test_starts_owned_server_and_stops_it_even_if_generation_fails(self):
+        client = llm.LocalOllama("http://localhost:11434")
+        for error in (None, ValueError("Falha na geração")):
+            with self.subTest(error=error), \
+                 patch.object(client, "request", side_effect=[llm._OllamaOffline(), {"models": []}]), \
+                 patch.object(llm.shutil, "which", return_value="/usr/bin/ollama"), \
+                 patch.object(llm.subprocess, "Popen") as start:
+                process = start.return_value
+                process.poll.return_value = None
+                try:
+                    with client.serving():
+                        self.assertEqual(start.call_args.args[0], ["/usr/bin/ollama", "serve"])
+                        self.assertEqual(start.call_args.kwargs["env"]["OLLAMA_HOST"], "127.0.0.1:11434")
+                        self.assertEqual(start.call_args.kwargs["env"]["OLLAMA_NO_CLOUD"], "1")
+                        if error:
+                            raise error
+                except ValueError as exc:
+                    self.assertIs(exc, error)
+                process.terminate.assert_called_once_with()
+                process.wait.assert_called_once_with(timeout=5)
+
+    def test_offline_listing_and_cloud_exclusion(self):
+        models = [{"name": "qwen3:4b", "size": 2_498_000_000},
+                  {"name": "remote", "size": 100, "remote_host": "example"},
+                  {"name": "alias:cloud", "size": 100},
+                  {"name": "broken"}]
+        with patch.object(llm.LocalOllama, "request", return_value={"models": models}):
+            self.assertEqual(llm.list_local_models(), [{"name": "qwen3:4b", "size_bytes": 2_498_000_000}])
+        with patch.object(llm.LocalOllama, "request", side_effect=llm._OllamaOffline):
+            self.assertEqual(llm.list_local_models(), [])
+
+    def test_kills_owned_server_only_after_termination_timeout(self):
+        client = llm.LocalOllama("http://[::1]:11434")
+        with patch.object(client, "request", side_effect=[llm._OllamaOffline(), {"models": []}]), \
+             patch.object(llm.shutil, "which", return_value="/usr/bin/ollama"), \
+             patch.object(llm.subprocess, "Popen") as start:
+            process = start.return_value
+            process.poll.return_value = None
+            process.wait.side_effect = [llm.subprocess.TimeoutExpired("ollama", 5), 0]
+            with client.serving():
+                self.assertEqual(start.call_args.kwargs["env"]["OLLAMA_HOST"], "[::1]:11434")
+            self.assertEqual(process.method_calls[-4:], [
+                call.terminate(), call.wait(timeout=5), call.kill(), call.wait(),
+            ])
+
+    def test_startup_reports_stderr_and_reaps_exited_process(self):
+        client = llm.LocalOllama("http://localhost:11434")
+        process = Mock()
+        process.poll.return_value = 1
+
+        def start(*args, stderr, **kwargs):
+            stderr.write(b"porta ocupada")
+            return process
+
+        with patch.object(client, "request", side_effect=llm._OllamaOffline), \
+             patch.object(llm.shutil, "which", return_value="/usr/bin/ollama"), \
+             patch.object(llm.subprocess, "Popen", side_effect=start), \
+             self.assertRaisesRegex(RuntimeError, "porta ocupada"):
+            with client.serving():
+                self.fail("Servidor não iniciou")
+        process.terminate.assert_not_called()
+        process.wait.assert_called_once_with(timeout=5)
+
+    def test_catalog_flags_large_models_and_unknown_sizes(self):
+        self.assertIsNone(llm.describe_model("qwen3:4b")["alerta_memoria"])
+        self.assertTrue(llm.describe_model("qwen3:14b")["alerta_memoria"])
+        self.assertEqual(llm.describe_model("outro", 9_000_000_000)["tier"], "Avançado")
+        self.assertEqual(llm.describe_model("outro")["ram_estimada"], "Desconhecida")

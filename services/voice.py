@@ -90,10 +90,11 @@ def unload_model() -> bool:
 
 
 @contextmanager
-def reserve_memory_for_llm():
+def reserve_memory_for_llm(*, unload: bool = True):
     """Impede que outra sessão recarregue o XTTS durante a geração do roteiro."""
     with _lock:
-        unload_model()
+        if unload:
+            unload_model()
         yield
 
 
@@ -107,7 +108,7 @@ def _fingerprints(paths: list[Path]) -> list[str]:
     return fingerprints
 
 
-def _prepare_reference(source: Path, destination: Path) -> None:
+def _prepare_reference(source: Path, destination: Path, *, highpass_hz: float | None = None) -> None:
     """Remove DC, reduz pausas e normaliza uma cópia para pico de -1 dBFS."""
     import librosa
 
@@ -122,6 +123,13 @@ def _prepare_reference(source: Path, destination: Path) -> None:
     audio = audio - np.mean(audio, dtype=np.float64)
     if not np.any(audio):
         raise ValueError(f"Áudio de referência sem sinal útil após remover DC: {source}")
+    if highpass_hz is not None:
+        from scipy.signal import butter, sosfilt
+
+        if rate <= 2 * highpass_hz:
+            raise ValueError("Taxa de amostragem insuficiente para preparar a referência.")
+        sections = butter(2, highpass_hz, btype="highpass", fs=rate, output="sos")
+        audio = sosfilt(sections, audio).astype(np.float32)
     intervals = librosa.effects.split(audio, top_db=30)
     pad = round(rate * 0.03)
     minimum_gap = round(rate * 0.35)
