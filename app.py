@@ -27,16 +27,14 @@ def prepare_script_with_ai() -> None:
         st.session_state["script_model"] = config.OLLAMA_MODEL
     selected_model = st.selectbox("Modelo local", models.keys(), key="script_model")
     description = llm.describe_model(selected_model, models[selected_model])
-    st.caption(f"{description['tier']} · RAM {description['ram_estimada']} · CPU {description['velocidade_cpu']}")
-    st.write(f"**Vantagens** · {description['vantagens']}")
-    st.write(f"**Desvantagens** · {description['desvantagens']}")
-    st.caption(description["recomendado_para"])
+    st.caption(f"{description['tier']} · {description['ram_estimada']} · {description['velocidade_cpu']}")
     if description["alerta_memoria"]:
         st.warning(description["alerta_memoria"])
-    st.caption(
-        "O Ollama roda neste computador. O roteiro preparado "
-        "substitui o texto do editor. Confira os dados e revise a explicação antes de narrar."
-    )
+    with st.expander("ℹ️ Sobre este modelo"):
+        st.write(f"**Prós** · {description['vantagens']}")
+        st.write(f"**Contras** · {description['desvantagens']}")
+        st.write(f"**Uso** · {description['recomendado_para']}")
+    st.caption("Roda localmente via Ollama e substitui o roteiro abaixo para revisão.")
     if not st.button("Transformar roteiro com IA", key="prepare_script"):
         return
     source = st.session_state.get("script_text", "")
@@ -82,13 +80,8 @@ with st.sidebar:
         key="tts_engine",
     )
     engine_description = audio.describe_tts_engine(selected_engine)
-    st.caption(engine_description["perfil"])
-    st.caption(f"CPU · {engine_description['velocidade_cpu']} · {engine_description['ram_estimada']}")
-    st.caption(f"Licença · {engine_description['licenca']}")
-    st.write(f"**Vantagens** · {engine_description['vantagens']}")
-    st.write(f"**Desvantagens** · {engine_description['desvantagens']}")
-    st.caption(engine_description["recomendado_para"])
-    st.caption("Use apenas gravações de voz que você tenha autorização para utilizar.")
+    st.caption(f"{engine_description['perfil']} · {engine_description['velocidade_cpu']} · "
+               f"{engine_description['ram_estimada']}")
     uses_qwen = selected_engine == "qwen3_06b"
     engine_available = not uses_qwen or qwen_tts.is_available()
     if not engine_available:
@@ -114,22 +107,33 @@ with st.sidebar:
         selected_voice = st.selectbox("Voz cadastrada", voices, key=selection_key)
     else:
         selected_voice = None
-        st.info("Nenhuma voz cadastrada. Adicione sua primeira voz autorizada acima.")
+        st.info("Nenhuma voz cadastrada. Adicione uma abaixo.")
+
+    with st.expander("ℹ️ Sobre este motor"):
+        st.write(f"**Prós** · {engine_description['vantagens']}")
+        st.write(f"**Contras** · {engine_description['desvantagens']}")
+        st.caption(f"Licença · {engine_description['licenca']}")
+        st.write(f"**Uso recomendado** · {engine_description['recomendado_para']}")
 
     with st.expander("➕ Adicionar nova voz autorizada"):
         new_voice_name = st.text_input("Nome da voz")
         if engine_description["requires_transcript"]:
-            sample = st.file_uploader("Arquivo de referência (.wav)", type=["wav"])
-            uploaded = [sample] if sample else []
+            uploaded = st.file_uploader(
+                "Arquivos de referência (.wav)", type=["wav"], accept_multiple_files=True,
+                help="Envie de 1 a 3 WAVs. A transcrição usa o primeiro.",
+            )
+            st.caption("1 a 3 WAVs (o 1º define o ritmo; mais arquivos nem sempre melhoram a voz).")
             if st.button("✨ Transcrever automaticamente", disabled=not engine_available):
-                if sample is None:
+                if not uploaded:
                     st.error("Envie um arquivo WAV para transcrever.")
+                elif len(uploaded) > 3:
+                    st.error("Selecione no máximo 3 arquivos WAV para o Qwen3-TTS.")
                 else:
                     try:
                         with st.spinner("Transcrevendo a referência neste computador..."):
                             with tempfile.TemporaryDirectory(prefix="ninecast_upload_") as directory:
                                 reference = Path(directory) / "referencia.wav"
-                                reference.write_bytes(sample.getvalue())
+                                reference.write_bytes(uploaded[0].getvalue())
                                 st.session_state["qwen_reference_transcript"] = qwen_tts.transcribe_reference(reference)
                         st.success("Transcrição preenchida. Você pode revisá-la antes de cadastrar.")
                     except MemoryError:
@@ -138,8 +142,7 @@ with st.sidebar:
                         st.error(f"Não foi possível transcrever a referência. {exc}")
             ref_text = st.text_area(
                 "Transcrição da referência (opcional)", key="qwen_reference_transcript",
-                placeholder="Deixe em branco para transcrever automaticamente ao cadastrar, ou revise/edite o texto.",
-                help="A fidelidade da clonagem ICL depende da precisão da transcrição.",
+                placeholder="Opcional: deixe em branco para transcrever automaticamente.",
             )
         else:
             uploaded = st.file_uploader(
@@ -160,7 +163,9 @@ with st.sidebar:
         if not engine_available:
             st.error("Instale o Qwen3-TTS antes de cadastrar uma voz.")
         elif uses_qwen and (not new_voice_name.strip() or not uploaded):
-            st.error("Informe o nome da voz e envie um arquivo WAV.")
+            st.error("Informe o nome da voz e envie de 1 a 3 arquivos WAV.")
+        elif uses_qwen and len(uploaded) > 3:
+            st.error("Selecione no máximo 3 arquivos WAV para o Qwen3-TTS.")
         elif not new_voice_name.strip() or not uploaded:
             st.error("Informe o nome da voz e selecione de 1 a 5 arquivos WAV.")
         elif len(uploaded) > 5:
@@ -180,7 +185,7 @@ with st.sidebar:
                             reference.write_bytes(sample.getvalue())
                             references.append(reference)
                         if uses_qwen:
-                            transcript = qwen_tts.register_voice(new_voice_name, references[0], ref_text)
+                            transcript = qwen_tts.register_voice(new_voice_name, references, ref_text)
                             if not ref_text.strip():
                                 st.session_state["voice_transcript"] = transcript
                         else:
@@ -194,19 +199,20 @@ with st.sidebar:
             except (ValueError, FileNotFoundError, OSError, RuntimeError) as exc:
                 st.error(f"Não foi possível cadastrar a voz: {exc}")
 
+    st.caption("Use apenas vozes autorizadas.")
+
 tab_novo, tab_biblioteca = st.tabs(["🎙️ Novo Episódio", "📚 Minha Biblioteca"])
 
 with tab_novo:
     with st.container(border=True):
         st.subheader("Seu roteiro")
-        st.caption("Escreva ou cole o texto que deseja narrar e revise-o antes da geração.")
         episode_title = st.text_input(
             "Título do episódio (opcional)",
             placeholder="Ex.: Introdução a bancos de dados",
         )
         with st.expander("📄 Importar texto de PDF"):
             pdf = st.file_uploader("Documento PDF", type=["pdf"])
-            st.caption("A extração é local. O texto importado substituirá o roteiro atual; revise-o antes de gerar áudio.")
+            st.caption("O PDF é lido localmente e substitui o roteiro para revisão.")
             if st.button("Extrair texto do PDF"):
                 if pdf is None:
                     st.error("Selecione um documento PDF.")
@@ -218,7 +224,7 @@ with tab_novo:
                         st.error(f"Não foi possível extrair o PDF: {exc}")
         with st.expander("✨ Preparar roteiro com IA local"):
             prepare_script_with_ai()
-        script = st.text_area("Texto do episódio", height=300, placeholder="Comece escrevendo seu roteiro aqui...", key="script_text")
+        script = st.text_area("Texto do episódio", height=300, placeholder="Escreva ou cole seu roteiro.", key="script_text")
         if script.strip():
             normalized_script = audio.normalize_text_for_tts(script)
             words = len(script.split())

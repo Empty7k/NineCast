@@ -17,6 +17,30 @@ _GENERATION = {
 }
 
 
+def _combine_embeddings(model, reference, sample_rate, extra_paths):
+    import librosa
+    import soundfile as sf
+    import torch
+
+    encoder_rate = model.speaker_encoder_sample_rate
+    embeddings, counts = [], []
+    audios = [(reference, sample_rate), *(sf.read(path, dtype="float32") for path in extra_paths)]
+    for samples, rate in audios:
+        if rate != encoder_rate:
+            samples = librosa.resample(samples, orig_sr=rate, target_sr=encoder_rate)
+        embeddings.append(model.extract_speaker_embedding(audio=samples, sr=encoder_rate))
+        counts.append(len(samples))
+    vectors = torch.stack(embeddings)
+    weights = vectors.new_tensor(counts)
+    weights /= weights.sum()
+    average = (vectors * weights[:, None]).sum(dim=0)
+    norm = torch.linalg.vector_norm(average)
+    target = (torch.linalg.vector_norm(vectors, dim=1) * weights).sum()
+    if not torch.isfinite(norm) or not torch.isfinite(target) or norm <= 0:
+        raise ValueError("As referências não produziram um embedding de locutor válido.")
+    return average * (target / norm)
+
+
 def synthesize(job: dict, emit) -> None:
     os.environ.setdefault("OMP_NUM_THREADS", str(job["threads"]))
     import numpy as np
@@ -36,6 +60,8 @@ def synthesize(job: dict, emit) -> None:
         prompt = model.create_voice_clone_prompt(
             ref_audio=(reference, sample_rate), ref_text=job["ref_text"], x_vector_only_mode=False,
         )
+        if extras := job.get("extra_references"):
+            prompt[0].ref_spk_embedding = _combine_embeddings(model.model, reference, sample_rate, extras)
         for index, (chunk, output) in enumerate(zip(job["chunks"], job["outputs"], strict=True), 1):
             started = time.perf_counter()
             waves, rate = model.generate_voice_clone(

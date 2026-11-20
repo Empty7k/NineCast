@@ -126,10 +126,11 @@ class AppTests(unittest.TestCase):
             app.button(key="refresh_models").click().run()
             app.selectbox(key="script_model").select("qwen3:14b").run()
             self.assertFalse(app.exception)
-            self.assertTrue(any("RAM" in item.value and "CPU" in item.value for item in app.caption))
+            self.assertTrue(any("Avançado · ~9,8–11,4 GB · Velocidade desconhecida" == item.value
+                                for item in app.caption))
             self.assertTrue(any("swap" in item.value for item in app.warning))
-            self.assertTrue(any("Vantagens" in item.value for item in app.markdown))
-            self.assertTrue(any("Desvantagens" in item.value for item in app.markdown))
+            self.assertTrue(any("Prós" in item.value for item in app.markdown))
+            self.assertTrue(any("Contras" in item.value for item in app.markdown))
             app.text_area(key="script_text").input("Texto de estudo.")
             app.button(key="prepare_script").click().run()
             models.assert_called_once_with(start_server=True)
@@ -327,7 +328,7 @@ class AppTests(unittest.TestCase):
             self.assertEqual(app.selectbox(key="qwen_voice_selection").options, ["Qwen"])
             self.assertFalse(any(c.label.startswith("Li e aceito") for c in app.checkbox))
             self.assertTrue(any("Apache-2.0" in c.value for c in app.caption))
-            self.assertTrue(any("6,81×" in c.value for c in app.caption))
+            self.assertTrue(any("Moderado (~7×)" in c.value for c in app.caption))
             app.text_area(key="script_text").input("Texto para o episódio.")
             next(b for b in app.button if b.label == "🎙️ Gerar Podcast").click().run()
             self.assertFalse(app.exception)
@@ -351,19 +352,23 @@ class AppTests(unittest.TestCase):
     def test_qwen_registration_transcribes_empty_field_and_removes_upload(self):
         sample = mock.Mock()
         sample.getvalue.return_value = b"audio"
+        samples = [sample, mock.Mock(), mock.Mock()]
+        samples[1].getvalue.return_value = b"extra 1"
+        samples[2].getvalue.return_value = b"extra 2"
         paths, names = [], []
 
         def upload(label, **kwargs):
             if label == "Documento PDF":
                 return None
             self.assertEqual(kwargs["type"], ["wav"])
-            self.assertFalse(kwargs.get("accept_multiple_files"))
-            return sample
+            self.assertTrue(kwargs["accept_multiple_files"])
+            self.assertIn("1 a 3", kwargs["help"])
+            return samples
 
-        def register(name, path, transcript):
-            self.assertEqual(path.read_bytes(), b"audio")
+        def register(name, references, transcript):
+            self.assertEqual([path.read_bytes() for path in references], [b"audio", b"extra 1", b"extra 2"])
             self.assertEqual(transcript, "")
-            paths.append(path)
+            paths.extend(references)
             names.append(name)
             return "Áudio transcrito no cadastro."
 
@@ -380,12 +385,15 @@ class AppTests(unittest.TestCase):
             self.assertFalse(app.error)
             self.assertEqual(app.selectbox(key="qwen_voice_selection").value, "Nova voz Qwen")
             self.assertTrue(any("Áudio transcrito no cadastro." == t.value for t in app.text))
-            self.assertEqual(len(paths), 1)
-            self.assertFalse(paths[0].exists())
+            self.assertEqual(len(paths), 3)
+            self.assertTrue(all(not path.exists() for path in paths))
+            self.assertTrue(any("mais arquivos nem sempre melhoram" in caption.value for caption in app.caption))
 
     def test_qwen_transcribe_button_fills_editor_and_saves_user_revision(self):
         sample = mock.Mock()
         sample.getvalue.return_value = b"audio"
+        extra = mock.Mock()
+        extra.getvalue.return_value = b"outro audio"
         paths = []
 
         def transcribe(path):
@@ -400,12 +408,13 @@ class AppTests(unittest.TestCase):
              mock.patch.object(qwen_tts, "transcribe_reference", side_effect=transcribe) as auto, \
              mock.patch.object(qwen_tts, "register_voice", return_value="Transcrição revisada.") as register, \
              mock.patch("streamlit.file_uploader", side_effect=lambda label, **kwargs:
-                        None if label == "Documento PDF" else sample):
+                        None if label == "Documento PDF" else [sample, extra]):
             app = self.app().run()
             next(b for b in app.button if b.label == "✨ Transcrever automaticamente").click().run()
             self.assertFalse(app.exception)
             self.assertFalse(app.error)
             auto.assert_called_once()
+            extra.getvalue.assert_not_called()
             register.assert_not_called()
             self.assertFalse(paths[0].exists())
             self.assertEqual(app.text_area(key="qwen_reference_transcript").value, "Transcrição automática.")
@@ -414,6 +423,20 @@ class AppTests(unittest.TestCase):
             next(b for b in app.button if b.label == "Cadastrar voz").click().run()
             self.assertFalse(app.exception)
             self.assertEqual(register.call_args.args[2], "Transcrição revisada.")
+
+
+    def test_qwen_rejects_four_uploads(self):
+        with mock.patch.object(config, "TTS_ENGINE", "qwen3_06b"), \
+             mock.patch.object(qwen_tts, "is_available", return_value=True), \
+             mock.patch.object(qwen_tts, "list_available_voices", return_value=[]), \
+             mock.patch.object(qwen_tts, "register_voice") as register, \
+             mock.patch("streamlit.file_uploader", side_effect=lambda label, **kwargs:
+                        None if label == "Documento PDF" else [mock.Mock() for _ in range(4)]):
+            app = self.app().run()
+            next(w for w in app.text_input if w.label == "Nome da voz").input("Nova voz Qwen")
+            next(w for w in app.button if w.label == "Cadastrar voz").click().run()
+            self.assertTrue(any("no máximo 3" in error.value for error in app.error))
+            register.assert_not_called()
 
 
 if __name__ == "__main__":

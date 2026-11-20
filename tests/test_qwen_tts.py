@@ -42,6 +42,8 @@ class QwenTests(unittest.TestCase):
         self.assertEqual(json.loads((profile / "profile.json").read_text()), {
             "ref_text": "Texto da gravação.",
             "sha256": hashlib.sha256(self.wav.read_bytes()).hexdigest(),
+            "extra_references": [],
+            "reference_hashes": [hashlib.sha256(self.wav.read_bytes()).hexdigest()],
         })
         samples, rate = sf.read(profile / "reference.wav")
         self.assertEqual(rate, 24000)
@@ -175,6 +177,10 @@ class QwenTests(unittest.TestCase):
 
     def test_one_worker_reports_progress_while_memory_is_reserved(self):
         qwen_tts.register_voice("voz", self.wav, "Texto.")
+        metadata = config.VOICES_DIR / "qwen" / "voz" / "profile.json"
+        original = json.loads(metadata.read_text())
+        metadata.write_text(json.dumps({key: original[key] for key in ("ref_text", "sha256")}))
+        self.assertEqual(qwen_tts.list_available_voices(), ["voz"])
         paths = [self.root / "01.wav", self.root / "02.wav"]
         steps = []
         process_code = """
@@ -182,6 +188,7 @@ import json, sys, wave
 job = json.load(sys.stdin)
 assert job["chunks"] == ["Primeiro.", "Segundo."]
 assert job["ref_text"] == "Texto."
+assert job["extra_references"] == []
 for i, path in enumerate(job["outputs"], 1):
     with wave.open(path, "wb") as wav:
         wav.setparams((1, 2, 24000, 0, "NONE", ""))
@@ -228,6 +235,77 @@ time.sleep(30)
             with self.assertRaisesRegex(ValueError, "cancelado"):
                 qwen_tts.synthesize_chunks(["Trecho."], "voz", [self.root / "out.wav"], callback)
         self.assertIsNotNone(processes[0].returncode)
+
+    def test_registers_multiple_references_and_validates_profile(self):
+        sources = [self.wav, self.root / "second.wav", self.root / "third.wav"]
+        for index, source in enumerate(sources[1:], 1):
+            sf.write(source, np.sin(np.arange(24000) * (0.05 + index / 100)), 24000)
+        for count in (1, 2, 3):
+            with self.subTest(count=count):
+                name = f"voz-{count}"
+                self.assertEqual(qwen_tts.register_voice(name, sources[:count], "Texto."), "Texto.")
+                profile = config.VOICES_DIR / "qwen" / name
+                extras = [f"extra_{index:02d}.wav" for index in range(1, count)]
+                metadata = json.loads((profile / "profile.json").read_text())
+                self.assertEqual(metadata["extra_references"], extras)
+                self.assertEqual(metadata["reference_hashes"],
+                                 [hashlib.sha256(p.read_bytes()).hexdigest() for p in sources[:count]])
+                for filename in ["reference.wav", *extras]:
+                    self.assertEqual((profile / filename).stat().st_mode & 0o777, 0o600)
+        for invalid in ([], sources + [self.wav]):
+            with self.assertRaisesRegex(ValueError, "1 a 3"):
+                qwen_tts.register_voice("inválida", invalid, "Texto.")
+
+        profile = config.VOICES_DIR / "qwen" / "voz-3"
+        output = self.root / "out.wav"
+        with mock.patch.object(qwen_tts, "is_available", return_value=True), \
+             mock.patch.object(qwen_tts, "_run_worker") as worker:
+            # Substitui a inferência e verifica os caminhos numerados entregues ao worker.
+            def synthesize(job, emit):
+                self.assertEqual(job["extra_references"],
+                                 [str(profile / "extra_01.wav"), str(profile / "extra_02.wav")])
+                sf.write(output, np.zeros(2400), 24000, subtype="PCM_16")
+                emit({"current": 1, "synthesis_seconds": 0.5})
+
+            worker.side_effect = synthesize
+            qwen_tts.synthesize_chunks(["Trecho."], "voz-3", [output])
+            worker.reset_mock()
+            extra = profile / "extra_01.wav"
+            extra.unlink()
+            self.assertNotIn("voz-3", qwen_tts.list_available_voices())
+            extra.symlink_to(self.wav)
+            self.assertNotIn("voz-3", qwen_tts.list_available_voices())
+            with self.assertRaises(FileNotFoundError):
+                qwen_tts.synthesize_chunks(["Trecho."], "voz-3", [output])
+            worker.assert_not_called()
+
+    def test_worker_combines_resampled_embeddings_and_preserves_icl(self):
+        import torch
+
+        extra = self.root / "extra.wav"
+        sf.write(extra, np.zeros(24000), 12000)
+        item = mock.Mock(ref_code=object(), ref_text="Texto principal.")
+        code = item.ref_code
+        package = mock.Mock()
+        model = package.Qwen3TTSModel.from_pretrained.return_value
+        model.create_voice_clone_prompt.return_value = [item]
+        model.model.speaker_encoder_sample_rate = 24000
+        model.model.extract_speaker_embedding.side_effect = [torch.tensor([3., 0.]), torch.tensor([0., 6.])]
+        model.generate_voice_clone.return_value = ([np.zeros(2400)], 24000)
+        job = {"threads": 6, "model": "modelo-local", "reference": str(self.wav),
+               "ref_text": "Texto principal.", "extra_references": [str(extra)],
+               "chunks": ["Trecho."], "outputs": [str(self.root / "out.wav")]}
+        with mock.patch.dict(sys.modules, {"qwen_tts": package}), \
+             mock.patch.object(torch, "set_num_threads"), mock.patch.object(torch, "set_num_interop_threads"):
+            qwen_tts_worker.synthesize(job, mock.Mock())
+        calls = model.model.extract_speaker_embedding.call_args_list
+        self.assertEqual([(len(c.kwargs["audio"]), c.kwargs["sr"]) for c in calls],
+                         [(24000, 24000), (48000, 24000)])
+        expected = torch.tensor([1., 4.]) * (5 / np.sqrt(17))
+        torch.testing.assert_close(item.ref_spk_embedding, expected)
+        self.assertIs(item.ref_code, code)
+        self.assertEqual(item.ref_text, "Texto principal.")
+        self.assertIs(model.generate_voice_clone.call_args.kwargs["voice_clone_prompt"][0], item)
 
     def test_worker_loads_model_and_icl_prompt_once(self):
         outputs = [self.root / "01.wav", self.root / "02.wav"]

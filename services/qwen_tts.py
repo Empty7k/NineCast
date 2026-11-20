@@ -6,6 +6,7 @@ import math
 import os
 import subprocess
 import tempfile
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Callable
 
@@ -16,6 +17,7 @@ from services import voice
 
 _INSTALL_HINT = "Execute ./ninecast.sh --install-qwen-tts para instalar o Qwen3-TTS."
 _DEFAULT_MODEL = "Qwen/Qwen3-TTS-12Hz-0.6B-Base"
+_EXTRA_NAMES = ("extra_01.wav", "extra_02.wav")
 
 
 def _python() -> Path:
@@ -45,11 +47,28 @@ def _profile_path(name: str) -> Path:
     return _profiles_dir() / name
 
 
-def _has_profile(path: Path) -> bool:
-    return not path.is_symlink() and path.is_dir() and all(
+def _read_profile(path: Path) -> dict | None:
+    if path.is_symlink() or not path.is_dir() or not all(
         (path / filename).is_file() and not (path / filename).is_symlink()
         for filename in ("reference.wav", "profile.json")
-    )
+    ):
+        return None
+    try:
+        metadata = json.loads((path / "profile.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(metadata, dict):
+        return None
+    extras = metadata.get("extra_references", [])
+    if not isinstance(extras, list) or extras != list(_EXTRA_NAMES[:len(extras)]):
+        return None
+    if any(not (path / name).is_file() or (path / name).is_symlink() for name in extras):
+        return None
+    return metadata
+
+
+def _has_profile(path: Path) -> bool:
+    return _read_profile(path) is not None
 
 
 def list_available_voices() -> list[str]:
@@ -68,25 +87,35 @@ def _wav_source(reference_wav: Path) -> Path:
     return source
 
 
-def register_voice(voice_name: str, reference_wav: Path, ref_text: str | None = None) -> str:
-    """Publica a referência e a transcrição informada ou obtida localmente."""
+def register_voice(voice_name: str, reference_wavs: Path | Sequence[Path],
+                   ref_text: str | None = None) -> str:
+    """Publica as referências e a transcrição do primeiro WAV."""
     path = _profile_path(voice_name)
     if ref_text is not None and not isinstance(ref_text, str):
         raise ValueError("A transcrição deve ser um texto.")
-    source = _wav_source(reference_wav)
+    if isinstance(reference_wavs, (str, os.PathLike)):
+        reference_wavs = [reference_wavs]
+    if not 1 <= len(reference_wavs) <= 3:
+        raise ValueError("Selecione de 1 a 3 arquivos WAV para o Qwen3-TTS.")
+    sources = [_wav_source(item) for item in reference_wavs]
+    extras = list(_EXTRA_NAMES[:len(sources) - 1])
     if path.exists() or path.is_symlink():
         raise FileExistsError("Já existe uma voz com esse nome. Escolha outro nome.")
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    with source.open("rb") as raw:
-        fingerprint = hashlib.file_digest(raw, "sha256").hexdigest()
     with tempfile.TemporaryDirectory(prefix=".cadastro-", dir=path.parent) as temporary:
         staged = Path(temporary)
         reference = staged / "reference.wav"
         metadata = staged / "profile.json"
-        voice._prepare_reference(source, reference, highpass_hz=75)
-        reference.chmod(0o600)
+        fingerprints = []
+        for source, filename in zip(sources, ["reference.wav", *extras], strict=True):
+            with source.open("rb") as raw:
+                fingerprints.append(hashlib.file_digest(raw, "sha256").hexdigest())
+            prepared = staged / filename
+            voice._prepare_reference(source, prepared, highpass_hz=75)
+            prepared.chmod(0o600)
         transcript = (ref_text or "").strip() or _transcribe_prepared(reference)
-        metadata.write_text(json.dumps({"ref_text": transcript, "sha256": fingerprint},
+        metadata.write_text(json.dumps({"ref_text": transcript, "sha256": fingerprints[0],
+                                        "extra_references": extras, "reference_hashes": fingerprints},
                                        ensure_ascii=False) + "\n", encoding="utf-8")
         metadata.chmod(0o600)
         # Diretórios publicados são não vazios, inclusive se outro cadastro vencer a corrida.
@@ -203,14 +232,12 @@ def synthesize_chunks(
     if not is_available():
         raise RuntimeError(_INSTALL_HINT)
     profile = _profile_path(voice_name)
-    if not _has_profile(profile):
-        raise FileNotFoundError("Cadastre uma referência para essa voz do Qwen3-TTS.")
-    try:
-        ref_text = json.loads((profile / "profile.json").read_text(encoding="utf-8"))["ref_text"]
-        if not isinstance(ref_text, str) or not ref_text.strip():
-            raise ValueError
-    except (KeyError, TypeError, ValueError) as exc:
-        raise ValueError("Transcrição inválida no perfil do Qwen3-TTS.") from exc
+    metadata = _read_profile(profile)
+    if metadata is None:
+        raise FileNotFoundError("Perfil do Qwen3-TTS ausente ou inválido. Cadastre a voz com os WAVs de referência.")
+    ref_text = metadata.get("ref_text")
+    if not isinstance(ref_text, str) or not ref_text.strip():
+        raise ValueError("Transcrição inválida no perfil do Qwen3-TTS.")
     paths = [Path(path).absolute() for path in output_paths]
     if len(set(paths)) != len(paths):
         raise ValueError("Cada trecho do Qwen3-TTS precisa de uma saída distinta.")
@@ -219,6 +246,7 @@ def synthesize_chunks(
     job = {
         "action": "synthesize", "model": _model_source(), "threads": config.CPU_THREADS,
         "reference": str((profile / "reference.wav").absolute()), "ref_text": ref_text,
+        "extra_references": [str((profile / name).absolute()) for name in metadata.get("extra_references", [])],
         "chunks": chunks, "outputs": [str(path) for path in paths],
     }
     metrics = []

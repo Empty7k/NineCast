@@ -209,17 +209,15 @@ def list_local_models(*, start_server: bool = False) -> list[dict]:
 _KNOWN_SIZES = {"qwen2.5:3b": 1_930_000_000, "qwen3:4b": 2_498_000_000,
                 "qwen3:8b": 5_225_000_000, "qwen3:14b": 9_276_000_000}
 _MEASURED_MODELS = {
-    "qwen2.5:3b": ("12,7–14,0 tokens/s", "Geração rápida e menor custo de memória.",
-                   "Omitiu o termo atomicidade no trecho técnico.", "Padrão para uso diário."),
-    "qwen3:4b": ("8,7–10,2 tokens/s de raciocínio", "Pesos compactos para uso local.",
-                 "A variante medida devolveu raciocínio e atingiu o limite de saída.",
-                 "Use uma variante de instruções ou híbrida para preparar roteiros."),
-    "qwen3:8b": ("5,3–6,3 tokens/s", "Reescreveu o trecho técnico com frases mais diretas e preservou o SQL.",
-                 "Mais lento e com maior uso de RAM. Também omitiu o termo atomicidade.",
-                 "Alternativa para comparar a redação de textos técnicos."),
-    "qwen3:14b": ("Sem medição concluída", "Permite testar um modelo de maior porte em CPU.",
-                  "O teste foi interrompido por pressão de memória antes de produzir um roteiro.",
-                  "Uso experimental com cerca de 10,6 GiB de RAM disponível para iniciar."),
+    "qwen2.5:3b": ("Rápido", "Leve e rápido em CPU.",
+                   "Pode perder detalhes técnicos.", "Padrão para uso diário."),
+    "qwen3:4b": ("Moderado", "Compacto para uso local.",
+                 "Esta variante exige raciocínio e é bloqueada para roteiros.",
+                 "Para roteiros, escolha uma variante que permita desativar o raciocínio."),
+    "qwen3:8b": ("Mais lento", "Frases mais diretas em textos técnicos.",
+                 "Mais lento e usa mais RAM.", "Roteiros técnicos."),
+    "qwen3:14b": ("Velocidade desconhecida", "Modelo de maior porte.",
+                  "Exige bastante RAM livre e pode usar swap.", "Uso experimental."),
 }
 
 
@@ -235,13 +233,14 @@ def describe_model(name: str, size_bytes: int | None = None) -> dict:
     heavy = gib >= 7
     tier = "Avançado" if heavy else "Intermediário" if gib >= 3.5 else "Leve"
     speed, pros, cons, use = _MEASURED_MODELS.get(name, (
-        "Não medida neste notebook", "Pesos locais com tamanho conhecido.",
+        "Velocidade desconhecida", "Modelo local com tamanho conhecido.",
         "Qualidade e latência dependem do modelo.",
         "Uso experimental com RAM livre suficiente." if heavy else "Avaliação com textos curtos.",
     ))
     return {
         "tier": tier,
-        "ram_estimada": f"~{gib + 0.5:.1f}–{gib + 2:.1f} GiB (pesos e execução)",
+        "ram_estimada": (f"~{(size + 0.5 * 2**30) / 10**9:.1f}–"
+                         f"{(size + 2 * 2**30) / 10**9:.1f} GB").replace(".", ","),
         "velocidade_cpu": speed,
         "vantagens": pros,
         "desvantagens": cons,
